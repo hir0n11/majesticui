@@ -682,6 +682,78 @@ class AppState:
             self._prune_finished_batches_locked()
         return {"removed": removed}
 
+    def add_domains_to_batch(self, batch_id: int, raw_domains: str, duplicate_store: DuplicateStore) -> Dict[str, Any]:
+        local_seen = set()
+        domains_to_add: List[str] = []
+        skipped_local = 0
+        skipped_duplicate_file = 0
+        skipped_invalid = 0
+
+        with self.lock:
+            active_items = [item for item in self.queue if item.batch_id == batch_id and item.state in {"queued", "processing"}]
+            if not active_items:
+                raise ValueError("Пачка не найдена в активной очереди")
+            title = active_items[0].title
+            existing = self._existing_active_domains()
+
+        for line in str(raw_domains or "").splitlines():
+            domain = self._normalize_domain(line)
+            if not domain:
+                continue
+            if not DOMAIN_RE.match(domain):
+                skipped_invalid += 1
+                continue
+            if domain in local_seen or domain in existing:
+                skipped_local += 1
+                continue
+            if domain in duplicate_store:
+                skipped_duplicate_file += 1
+                continue
+            local_seen.add(domain)
+            domains_to_add.append(domain)
+
+        items: List[QueueItem] = []
+        with self.lock:
+            active_items = [item for item in self.queue if item.batch_id == batch_id and item.state in {"queued", "processing"}]
+            if not active_items:
+                raise ValueError("Пачка не найдена в активной очереди")
+            title = active_items[0].title
+            existing_now = self._existing_active_domains()
+            for domain in domains_to_add:
+                if domain in existing_now:
+                    skipped_local += 1
+                    continue
+                items.append(
+                    QueueItem(
+                        item_id=self.next_item_id,
+                        batch_id=batch_id,
+                        title=title,
+                        domain=domain,
+                    )
+                )
+                self.next_item_id += 1
+                existing_now.add(domain)
+
+            if items:
+                if batch_id not in self.batch_order:
+                    self.batch_order.append(batch_id)
+                self.queue.extend(items)
+                self.last_status = "READY" if not self.running else self.last_status
+
+            self.load_stats["loaded"] += len(items)
+            self.load_stats["duplicates_skipped"] += skipped_local
+            self.load_stats["duplicates_from_file"] += skipped_duplicate_file
+            self.load_stats["invalid_skipped"] += skipped_invalid
+
+        return {
+            "batch_id": batch_id,
+            "title": title,
+            "loaded": len(items),
+            "duplicates_skipped": skipped_local,
+            "duplicates_from_file": skipped_duplicate_file,
+            "invalid_skipped": skipped_invalid,
+        }
+
     def move_batch(self, batch_id: int, direction: str) -> Dict[str, Any]:
         if direction not in {"up", "down"}:
             raise ValueError("direction должен быть up или down")
@@ -2479,6 +2551,21 @@ def api_remove_domains(batch_id: int):
     domains = payload.get("domains", "")
     stats = state.remove_domains(batch_id, domains)
     logger.info(f"Из пачки {batch_id} убрано доменов: {stats['removed']}")
+    return jsonify({"ok": True, **stats})
+
+
+@app.post("/api/batches/<int:batch_id>/add-domains")
+def api_add_domains_to_batch(batch_id: int):
+    payload = request.get_json(force=True)
+    domains = payload.get("domains", "")
+    try:
+        stats = state.add_domains_to_batch(batch_id, domains, duplicate_store)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    logger.info(
+        f"В пачку {batch_id} добавлено доменов: {stats['loaded']}, локальных дублей: {stats['duplicates_skipped']}, "
+        f"из txt: {stats['duplicates_from_file']}, невалидных: {stats['invalid_skipped']}"
+    )
     return jsonify({"ok": True, **stats})
 
 

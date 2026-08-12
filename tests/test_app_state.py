@@ -610,6 +610,50 @@ class AppStateTests(unittest.TestCase):
         self.assertEqual(state.get_next_item().title, "FIRST")
         self.assertNotEqual(first["batch_id"], second["batch_id"])
 
+    def test_add_domains_to_existing_batch_by_id(self):
+        state = app_module.AppState()
+        duplicates = EmptyDuplicates()
+        first = state.add_batch("FIRST", "first.example", duplicates)
+        second = state.add_batch("SECOND", "second.example", duplicates)
+
+        stats = state.add_domains_to_batch(
+            first["batch_id"],
+            "https://www.extra.example/path\nsecond.example\nbad..example",
+            duplicates,
+        )
+
+        self.assertEqual(stats["loaded"], 1)
+        self.assertEqual(stats["duplicates_skipped"], 1)
+        self.assertEqual(stats["invalid_skipped"], 1)
+        first_domains = [
+            item.domain
+            for item in state.queue
+            if item.batch_id == first["batch_id"] and item.state == "queued"
+        ]
+        self.assertEqual(first_domains, ["first.example", "extra.example"])
+        self.assertEqual(state.get_next_item().domain, "first.example")
+        state.complete_item(state.current_item_id, "BAD")
+        self.assertEqual(state.get_next_item().domain, "extra.example")
+
+    def test_add_domains_to_existing_batch_endpoint(self):
+        test_state = app_module.AppState()
+        duplicates = EmptyDuplicates()
+        batch = test_state.add_batch("FIRST", "first.example", duplicates)
+        with (
+            patch.object(app_module, "state", test_state),
+            patch.object(app_module, "duplicate_store", duplicates),
+        ):
+            response = app_module.app.test_client().post(
+                f"/api/batches/{batch['batch_id']}/add-domains",
+                json={"domains": "extra.example\nfirst.example"},
+            )
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["loaded"], 1)
+        self.assertEqual(data["duplicates_skipped"], 1)
+        self.assertEqual([item.domain for item in test_state.queue], ["first.example", "extra.example"])
+
     def test_prompt_files_persist_independently_from_app_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

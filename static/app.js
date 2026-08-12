@@ -33,7 +33,7 @@ const els = {
   logBox: document.getElementById("logBox"),
   clearLogBtn: document.getElementById("clearLogBtn"),
   resultsBody: document.getElementById("resultsBody"),
-  removeDomainsTemplate: document.getElementById("removeDomainsTemplate"),
+  batchDomainsTemplate: document.getElementById("batchDomainsTemplate"),
   promptEditorBtn: document.getElementById("promptEditorBtn"),
   strictModeToggle: document.getElementById("strictModeToggle"),
   strictUniqueDeficitInput: document.getElementById("strictUniqueDeficitInput"),
@@ -275,22 +275,29 @@ function renderResults(rows) {
   });
 }
 
-function attachRemoveDomainsBox(card, batchId) {
-  const existing = card.querySelector(".remove-box");
+function attachAddDomainsBox(card, batch) {
+  const existing = card.querySelector(".batch-domains-box");
   if (existing) {
     existing.remove();
     return;
   }
-  const box = els.removeDomainsTemplate.content.firstElementChild.cloneNode(true);
+  const box = els.batchDomainsTemplate.content.firstElementChild.cloneNode(true);
   card.appendChild(box);
-  box.querySelector(".remove-domains-input").focus();
-  box.querySelector(".cancel-remove-domains").addEventListener("click", () => box.remove());
-  box.querySelector(".confirm-remove-domains").addEventListener("click", async () => {
-    const domains = box.querySelector(".remove-domains-input").value.trim();
+  box.querySelector(".batch-domains-title").textContent = `Добавить домены в «${batch.title}»`;
+  box.querySelector(".batch-domains-input").focus();
+  box.querySelector(".cancel-batch-domains").addEventListener("click", () => box.remove());
+  box.querySelector(".confirm-batch-domains").addEventListener("click", async () => {
+    const domains = box.querySelector(".batch-domains-input").value.trim();
     if (!domains) return alert("Вставь хотя бы один домен");
     try {
-      await postJSON(`/api/batches/${batchId}/remove-domains`, { domains });
-      box.remove();
+      const data = await postJSON(`/api/batches/${batch.batch_id}/add-domains`, { domains });
+      const summary = `Добавлено ${data.loaded || 0} · дубли ${data.duplicates_skipped || 0} · из txt ${data.duplicates_from_file || 0} · невалидных ${data.invalid_skipped || 0}`;
+      if ((data.loaded || 0) > 0) {
+        box.remove();
+      } else {
+        box.querySelector(".batch-domains-result").textContent = summary;
+      }
+      lastQueueSignature = "";
       await refreshStatus();
     } catch (error) { alert(error.message); }
   });
@@ -323,7 +330,7 @@ function renderQueueBatches(batches) {
             <button class="small secondary move-up-btn" title="Поднять пачку" ${index === 0 ? "disabled" : ""}>↑</button>
             <button class="small secondary move-down-btn" title="Опустить пачку" ${index === batches.length - 1 ? "disabled" : ""}>↓</button>
           </div>
-          <button class="small secondary remove-domains-btn">Домены</button>
+          <button class="small secondary add-domains-btn" title="Добавить домены в эту пачку">Добавить</button>
           <button class="small danger remove-batch-btn">Удалить</button>
         </div>
       </div>
@@ -346,7 +353,7 @@ function renderQueueBatches(batches) {
         await refreshStatus();
       } catch (error) { alert(error.message); }
     });
-    card.querySelector(".remove-domains-btn").addEventListener("click", () => attachRemoveDomainsBox(card, batch.batch_id));
+    card.querySelector(".add-domains-btn").addEventListener("click", () => attachAddDomainsBox(card, batch));
     els.queueGroupsBox.appendChild(card);
   });
 }

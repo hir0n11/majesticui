@@ -234,14 +234,15 @@
     </form>
   </dialog>
 
-  <template id="removeDomainsTemplate">
-    <div class="remove-box">
-      <label>Домены для удаления из этой пачки</label>
-      <textarea class="remove-domains-input" placeholder="domain1.pl&#10;domain2.pl"></textarea>
+  <template id="batchDomainsTemplate">
+    <div class="batch-domains-box">
+      <label class="batch-domains-title">Добавить домены в пачку</label>
+      <textarea class="batch-domains-input" placeholder="domain1.pl&#10;domain2.pl"></textarea>
       <div class="form-actions">
-        <button class="confirm-remove-domains small danger">Убрать домены</button>
-        <button class="cancel-remove-domains small secondary">Отмена</button>
+        <button class="confirm-batch-domains small accent">Добавить домены</button>
+        <button class="cancel-batch-domains small secondary">Отмена</button>
       </div>
+      <div class="batch-domains-result muted"></div>
     </div>
   </template>
 

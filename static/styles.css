@@ -437,8 +437,14 @@ textarea { min-height: 128px; resize: vertical; }
 .queue-actions { justify-content: flex-end; flex: 0 0 auto; }
 .move-controls { display: flex; gap: 3px; }
 .move-controls button { width: 28px; padding: 0; }
-.remove-box { padding: 9px; border-top: 1px solid var(--line-soft); background: #14171b; }
-.remove-box textarea { min-height: 74px; }
+.batch-domains-box {
+  margin-top: 8px;
+  padding: 9px;
+  border-top: 1px solid var(--line-soft);
+  background: #14171b;
+}
+.batch-domains-box textarea { min-height: 74px; }
+.batch-domains-result { margin-top: 6px; }
 
 .results-card { min-width: 0; }
 .table-wrap {
