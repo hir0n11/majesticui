@@ -934,6 +934,28 @@ class DomainAggregationTests(unittest.TestCase):
         }
         self.assertIsNone(local_historic_pages_precheck("example.at", "AT", pages))
 
+    def test_historic_pages_reject_single_crypto_signals_category(self):
+        pages = {
+            "rows": [
+                {
+                    "page_url": "https://deltalloydonk.org/",
+                    "page_title": "Delta Lloyd Regatta",
+                    "last_seen": "27 Sep 2022",
+                },
+                {
+                    "page_url": "https://deltalloydonk.org/category/krypto-signale/",
+                    "page_title": "Krypto Signale",
+                    "last_seen": "27 Sep 2022",
+                    "referring_urls": 1,
+                    "referring_domains": 1,
+                },
+            ]
+        }
+        result = local_historic_pages_precheck("deltalloydonk.org", "NL", pages)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "BAD:HISTORIC_PAGES")
+        self.assertIn("crypto/krypto signals", result.reason)
+
     def test_historic_pages_detect_wp_asset_doorway_spam(self):
         pages = {
             "rows": [

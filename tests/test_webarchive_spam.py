@@ -73,6 +73,14 @@ class WebArchiveSpamTests(unittest.TestCase):
         categories = {match.category for match in matches}
         self.assertIn("japanese sidejob/investment spam", categories)
 
+    def test_detects_german_krypto_signale_archive_spam(self):
+        matches = scan_wayback_text(
+            "Kategorie Krypto Signale. Bitcoin trading investment signals und aktuelle Krypto-Signale.",
+            locale="NL",
+        )
+        categories = {match.category for match in matches}
+        self.assertIn("crypto/nft", categories)
+
     def test_cjk_reuse_is_ignored_for_cjk_locale_only(self):
         text = "日本語のテキストです。" * 80
         self.assertFalse(scan_wayback_text(text, locale="JP"))

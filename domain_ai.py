@@ -935,11 +935,18 @@ HISTORIC_PAGE_FORBIDDEN_RE = re.compile(
     r"競馬|賭け|賭博|カジノ|ブックメーカー|"
     r"adult|porn|porno|порно|erotikads|erotik\s*ads|erotische\s+massage|erotic\s+massage|sensual\s+massage|"
     r"sexspielzeug(?:e|en)?|sexuelle\s+fantasien|sexuelle\s+bed[üu]rfnisse|sexuelle\s+verbindung|naked\s+body|"
-    r"viagra|cialis|levitra|crypto\s*(?:scam|casino)|"
+    r"viagra|cialis|levitra|(?:crypto|krypto)\s*(?:scam|casino|signals?|signale|trading|investment|investing)|"
     r"forex|\bfx\b|foreign\s+exchange|binary\s+options?|metatrader|"
     r"exam\s+(?:dumps?|questions?|sims?|test|guide)|certification\s+(?:dumps?|questions?)|"
     r"braindumps?|testking|pdfvce|itdumpskr|newdumpspdf|itzert|topexam|"
     r"doorway|дорве|\bslots?\b|\bpoker\b|บาคาร่า)",
+    re.IGNORECASE,
+)
+HISTORIC_PAGE_STRONG_FORBIDDEN_RE = re.compile(
+    r"(?:"
+    r"(?:^|[/\s_-])(?:crypto|krypto)[/\s_-]*(?:signals?|signale|trading|investment|investing)(?:$|[/\s_-])|"
+    r"(?:^|[/\s_-])(?:bitcoin|btc)[/\s_-]*(?:signals?|trading|investment|investing)(?:$|[/\s_-])"
+    r")",
     re.IGNORECASE,
 )
 HISTORIC_PAGE_MEANINGFUL_PATH_RE = re.compile(
@@ -1528,6 +1535,30 @@ def local_historic_pages_precheck(
     locale, locale_source = resolve_locale_with_source(title, domain, "")
     required_unique, required_articles = thresholds_for_locale(locale)
     forbidden_inner_rows = _historic_forbidden_inner_rows(rows, domain)
+    strong_forbidden_rows = [
+        row
+        for row in forbidden_inner_rows
+        if HISTORIC_PAGE_STRONG_FORBIDDEN_RE.search(_historic_page_text(row))
+    ]
+    if strong_forbidden_rows:
+        examples = "; ".join(_short_page_example(row) for row in strong_forbidden_rows[:3])
+        reason = (
+            "Historic Pages показывает сильный запрещённый след в истории проверяемого домена: "
+            f"{examples}. Это признак переиспользования под crypto/krypto signals/trading. "
+            "AI не вызывался."
+        )
+        return DomainVerdict(
+            verdict="REJECT",
+            status="BAD:HISTORIC_PAGES",
+            reason=reason,
+            locale=locale,
+            locale_source=locale_source,
+            required_unique=required_unique,
+            required_articles=required_articles,
+            model="LOCAL_RULES",
+            early_stop_stage="local_historic_pages",
+            hard_stop_reasons=[reason],
+        )
     if len(forbidden_inner_rows) >= 2:
         examples = "; ".join(_short_page_example(row) for row in forbidden_inner_rows[:3])
         reason = (

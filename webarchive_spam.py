@@ -268,7 +268,9 @@ SPAM_PATTERNS: Sequence[tuple[str, re.Pattern[str]]] = (
         re.compile(
             r"\b(?:crypto(?:currency)?|bitcoin|bitcoins|blockchain|ethereum|litecoin|"
             r"dogecoin|altcoin|memecoin|airdrop|binance|coinbase|web3|metaverse|"
-            r"nft(?:s)?|token\s+(?:sale|airdrop|swap)|coin\s+(?:market|wallet|trading))\b",
+            r"nft(?:s)?|token\s+(?:sale|airdrop|swap)|coin\s+(?:market|wallet|trading)|"
+            r"(?:crypto|krypto)\s*(?:signals?|signale|trading|investment|investing)|"
+            r"(?:bitcoin|btc)\s*(?:signals?|trading|investment|investing))\b",
             re.IGNORECASE,
         ),
     ),
