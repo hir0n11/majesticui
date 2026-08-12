@@ -1,0 +1,473 @@
+MajUI — установка с нуля
+========================
+
+Этот архив содержит локальный интерфейс для проверки drop-доменов через Majestic,
+AI-модель и WebArchive spam gate.
+
+Коротко: скрипт открывает Majestic в Chrome через Selenium, собирает нужные отчёты,
+локально отсекает очевидный мусор, отправляет оставшиеся данные в OpenAI-compatible API
+и записывает GOOD / GOOD NEAR домены в Google Sheets.
+
+
+1. Что нужно заранее
+--------------------
+
+Обязательно:
+
+1) Windows 10/11.
+2) Google Chrome.
+3) Python 3.10+ или 3.11+.
+   При установке Python обязательно включи галочку:
+   "Add python.exe to PATH".
+4) Аккаунт Majestic с доступом к Site Explorer:
+   - Link Context;
+   - Backlinks;
+   - Anchor Text;
+   - Pages / Historic.
+5) API-ключ OpenAI-compatible провайдера.
+   Например:
+   - Base URL: https://arionhub.pro/v1
+   - Model: gpt-5.6-terra или gpt-5.6-sol
+
+Опционально:
+
+6) Google Sheets API + credentials.json, если нужна запись GOOD-доменов в таблицу.
+
+
+2. Распаковка
+-------------
+
+Распакуй архив в удобную папку без кириллицы в пути, например:
+
+    C:\MajUI
+
+или:
+
+    W:\MajUI
+
+Не запускай проект прямо из zip-архива — сначала распакуй.
+
+
+3. Установка Python-зависимостей
+--------------------------------
+
+Открой PowerShell в папке проекта.
+
+Пример:
+
+    cd C:\MajUI
+
+Обнови pip:
+
+    py -3 -m pip install --upgrade pip
+
+Установи зависимости:
+
+    py -3 -m pip install -r requirements.txt
+
+Если команда py не работает, попробуй:
+
+    python -m pip install -r requirements.txt
+
+
+4. Настройка AI API
+-------------------
+
+Ключ хранится в переменных окружения Windows. В код ключ вставлять не нужно.
+
+Открой PowerShell и выполни:
+
+    [Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "ВСТАВИТЬ_КЛЮЧ_СЮДА", "User")
+    [Environment]::SetEnvironmentVariable("OPENAI_BASE_URL", "https://arionhub.pro/v1", "User")
+    [Environment]::SetEnvironmentVariable("OPENAI_DOMAIN_MODEL", "gpt-5.6-terra", "User")
+
+После этого закрой PowerShell и запусти новый, либо просто перезапусти приложение.
+
+Если используешь официальный OpenAI API, Base URL можно не задавать или поставить:
+
+    [Environment]::SetEnvironmentVariable("OPENAI_BASE_URL", "https://api.openai.com/v1", "User")
+
+Модель можно менять в интерфейсе. Сейчас в проекте предусмотрены:
+
+    gpt-5.6-terra
+    gpt-5.6-sol
+
+Terra обычно дешевле и уже показала себя нормально для текущей логики.
+
+
+5. Дополнительные AI-настройки
+------------------------------
+
+Они не обязательны, но при переносе можно выставить такие значения:
+
+    [Environment]::SetEnvironmentVariable("OPENAI_AI_WORKERS", "2", "User")
+    [Environment]::SetEnvironmentVariable("OPENAI_REASONING_EFFORT", "low", "User")
+    [Environment]::SetEnvironmentVariable("OPENAI_LINK_BATCH_SIZE", "25", "User")
+    [Environment]::SetEnvironmentVariable("OPENAI_FETCH_ARTICLE_PAGES", "1", "User")
+    [Environment]::SetEnvironmentVariable("OPENAI_MAX_ARTICLE_PAGES", "12", "User")
+    [Environment]::SetEnvironmentVariable("OPENAI_BROWSER_ARTICLE_PAGES", "4", "User")
+    [Environment]::SetEnvironmentVariable("OPENAI_ARTICLE_TEXT_CHARS", "1200", "User")
+
+Strict mode и свежесть ссылочного также можно менять в интерфейсе.
+
+
+6. Настройка Majestic
+---------------------
+
+При запуске скрипт создаёт отдельный Chrome-профиль:
+
+    C:\MajesticSeleniumProfile
+
+Это удобно: логин Majestic хранится отдельно от обычного Chrome.
+
+Первый запуск:
+
+1) Запусти start_ui.vbs или reset.bat.
+2) Откроется Chrome.
+3) В первой вкладке будет Majestic.
+4) В другой вкладке будет локальный интерфейс:
+
+       http://127.0.0.1:5000
+
+5) Войди в Majestic вручную.
+6) После логина в интерфейсе нажми кнопку:
+
+       Продолжить после логина
+
+Если Majestic разлогинит аккаунт, интерфейс станет красным — это сигнал,
+что нужно снова залогиниться и нажать кнопку продолжения.
+
+
+7. Настройка Google Sheets
+--------------------------
+
+Если Google Sheets не нужен, можно отключить его в app.py:
+
+    GOOGLE_SHEETS_ENABLED = False
+
+Если Google Sheets нужен:
+
+1) Создай Google Cloud service account.
+2) Скачай JSON-ключ.
+3) Положи его в папку проекта рядом с app.py под именем:
+
+       credentials.json
+
+4) Открой credentials.json и найди поле:
+
+       client_email
+
+5) Поделись Google-таблицей с этим email, выдай права Editor.
+6) В app.py проверь:
+
+       GOOGLE_SHEET_ID
+       GOOGLE_SHEET_NAME
+       GOOGLE_ARCHIVE_SHEET_NAME
+       GOOGLE_CREDS_PATH
+
+По умолчанию:
+
+    GOOGLE_SHEET_NAME = "Majestic Local UI"
+    GOOGLE_ARCHIVE_SHEET_NAME = "Archive"
+    GOOGLE_CREDS_PATH = "credentials.json"
+
+Основной лист должен существовать. Лист Archive скрипт может создать сам,
+если сервисный аккаунт имеет права на редактирование таблицы.
+
+
+8. Запуск
+---------
+
+Обычный запуск:
+
+    start_ui.vbs
+
+или:
+
+    reset.bat
+
+Оба варианта делают чистый запуск:
+
+- закрывают только прошлый процесс этого проекта;
+- закрывают Chrome только с профилем C:\MajesticSeleniumProfile;
+- очищают lock-файлы Selenium-профиля;
+- запускают приложение заново.
+
+Локальный интерфейс:
+
+    http://127.0.0.1:5000
+
+
+9. Как пользоваться
+-------------------
+
+1) В поле "Название пачки" напиши понятное имя выгрузки.
+   Это может быть PL, AT, HU export и т.д.
+
+   Важно: обычное название пачки не фиксирует локаль домена жёстко.
+   AI всё равно пытается определить реальную локаль по контексту.
+
+2) Вставь домены — по одному в строке.
+3) Нажми "Добавить в очередь".
+4) Нажми "Старт".
+5) Дождись обработки.
+
+В таблице результатов основные поля:
+
+    Пачка
+    Домен
+    Итог
+    Локаль
+    AI
+    U/A/Home
+    WebArchive
+    Причина итога
+
+U/A/Home:
+
+    U = уникальные качественные доноры
+    A = статейные ссылки
+    Home = точные ссылки на главную /
+
+Статейные 0.5 округляются вверх:
+
+    3.5 -> 4
+    4.5 -> 5
+
+
+10. Что проверяет скрипт
+------------------------
+
+Каскад проверки идёт от дешёвых этапов к дорогим:
+
+1) Локальная проверка имени домена.
+   Например очевидные pharma/casino/cheap jerseys/crypto spam слова.
+
+2) Majestic Context.
+   Быстрая стартовая проверка профиля.
+
+3) Backlinks Fresh:
+   - DoFollow;
+   - 1 backlink per referring domain;
+   - deleted/lost ссылки НЕ скрываются, потому что Majestic часто ошибается.
+
+4) Historic Pages.
+   Локально ловит следы переспама/переиспользования:
+   - casino/adult/pharma/forex/crypto;
+   - старые внутренние страницы прошлого сайта;
+   - дорвеи в wp-content/wp-includes;
+   - спамные страницы в Historic Pages.
+
+5) Anchor Text Fresh + Historic.
+
+6) AI-проверка:
+   - качество ссылок;
+   - статейность;
+   - анкорный риск;
+   - PBN/спам-риски;
+   - локаль домена;
+   - возраст/свежесть ссылочного по явным годам в URL/title/тексте.
+
+7) WebArchive spam gate для GOOD / GOOD NEAR.
+   Проверяет последние годы жизни домена, а не просто последние календарные годы.
+
+
+11. Основные статусы
+--------------------
+
+GOOD
+    Домен прошёл строгий порог.
+
+GOOD NEAR
+    Домен хороший, но немного не дотягивает.
+    Допуск зависит от настроек strict mode.
+
+LOW PROFILE
+    Профиль слишком слабый даже для NEAR.
+
+BAD
+    Общий плохой результат.
+
+BAD:HOMEPAGE_SHARE
+    Меньше 50% качественных уникальных ссылок ведёт на точную главную /.
+
+BAD:HISTORIC_PAGES
+    Historic Pages показывает следы юза/спама/дорвеев.
+
+BAD:WEBARCHIVE_SPAM
+    WebArchive показал запрещённый или явно спамный контент.
+
+BAD:AI_HARD_STOP
+    AI нашёл жёсткий стоп.
+
+BAD:AI_RISK
+    AI нашёл риск, которого достаточно для отказа.
+
+ERROR:AI_NOT_CONFIGURED
+    Не задан OPENAI_API_KEY или не установлен пакет openai.
+
+ERROR:AI
+    Ошибка API-модели.
+
+ERROR:MAJESTIC_REPORT
+    Один из отчётов Majestic не загрузился после повторов.
+
+ERROR:PARSER
+    Изменилась DOM-разметка Majestic или парсер не смог разобрать страницу.
+
+
+12. Промпты
+-----------
+
+Промпты лежат в файлах:
+
+    domain_screen_prompt.txt
+    domain_drop_prompt.txt
+    domain_article_prompt.txt
+    domain_anchor_prompt.txt
+
+Их можно редактировать через кнопку "Промпты AI" в интерфейсе.
+
+Промпты сохраняются на диск и не сбрасываются при reset.bat.
+
+
+13. Файлы, которые НЕ входят в установочный архив
+-------------------------------------------------
+
+В архив специально не включаются:
+
+    credentials.json
+    results.csv
+    duplicates_drops.txt
+    last_backlinks_debug.json
+    majui.pid
+    MajUI.zip
+    *.lnk
+    __pycache__
+    .git
+
+Почему:
+
+- credentials.json — секрет Google service account;
+- results.csv — твоя история проверок;
+- duplicates_drops.txt — твоя база дублей;
+- last_backlinks_debug.json — временный debug;
+- majui.pid — служебный PID;
+- старые zip/lnk/git/cache не нужны для чистой установки.
+
+Если нужно перенести рабочую базу дублей, скопируй duplicates_drops.txt отдельно.
+Если нужно перенести Google Sheets-доступ, скопируй credentials.json отдельно.
+
+
+14. Проверка установки
+----------------------
+
+После установки можно прогнать тесты:
+
+    py -3 -m unittest discover -s tests
+
+Если тесты прошли, базовая логика проекта не сломана.
+
+
+15. Частые проблемы
+-------------------
+
+Проблема:
+    Chrome не готов / не запускается.
+
+Что делать:
+    Установи Google Chrome.
+    Запусти reset.bat.
+    Проверь, что нет зависшего Chrome с профилем C:\MajesticSeleniumProfile.
+
+
+Проблема:
+    ERROR:AI_NOT_CONFIGURED.
+
+Что делать:
+    Проверь OPENAI_API_KEY:
+
+        [Environment]::GetEnvironmentVariable("OPENAI_API_KEY", "User")
+
+    Если пусто — задай ключ заново.
+
+
+Проблема:
+    401 Incorrect API key.
+
+Что делать:
+    Ключ неверный или не от того Base URL.
+    Для arionhub обычно нужен:
+
+        OPENAI_BASE_URL=https://arionhub.pro/v1
+
+
+Проблема:
+    403 no access to model.
+
+Что делать:
+    В кабинете API-ключа разреши нужную модель:
+
+        gpt-5.6-terra
+        gpt-5.6-sol
+
+    Либо выбери доступную модель в интерфейсе.
+
+
+Проблема:
+    Google Sheets не пишет.
+
+Что делать:
+    Проверь credentials.json.
+    Проверь GOOGLE_SHEET_ID в app.py.
+    Проверь, что таблица расшарена на client_email из credentials.json.
+
+
+Проблема:
+    Majestic разлогинился.
+
+Что делать:
+    Войди в Majestic в открытом Chrome.
+    Нажми "Продолжить после логина" в локальном интерфейсе.
+
+
+Проблема:
+    WebArchive долго висит в очереди.
+
+Что делать:
+    Это нормально: CDX API WebArchive иногда тупит.
+    Скрипт повторяет запросы и не блокирует основную очередь Majestic/AI.
+
+
+16. Обновление проекта
+----------------------
+
+Перед обновлением сохрани отдельно:
+
+    credentials.json
+    duplicates_drops.txt
+    results.csv
+    domain_*_prompt.txt
+
+Потом замени файлы проекта из нового архива.
+После обновления установи зависимости ещё раз:
+
+    py -3 -m pip install -r requirements.txt
+
+И запусти reset.bat.
+
+
+17. Минимальный чек-лист после переноса
+---------------------------------------
+
+1) Файлы распакованы.
+2) Python установлен.
+3) requirements.txt установлен.
+4) OPENAI_API_KEY задан.
+5) OPENAI_BASE_URL задан, если используется не официальный OpenAI.
+6) Chrome установлен.
+7) Majestic залогинен в Selenium Chrome.
+8) credentials.json положен, если нужна Google Sheets запись.
+9) start_ui.vbs или reset.bat запускает интерфейс.
+10) Тестовая пачка из 1-2 доменов проходит без ERROR.
+

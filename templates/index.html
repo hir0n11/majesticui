@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Majestic Domain Review</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand-block">
+      <span class="brand-mark">M</span>
+      <div>
+        <h1>Majestic Domain Review</h1>
+        <p>Очередь и AI-проверка дроп-доменов</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button id="promptEditorBtn" class="secondary">Промпты AI</button>
+      <a class="button-link secondary" href="/api/download/results.csv">Скачать CSV</a>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="service-bar" aria-label="Состояние сервисов">
+      <div class="service-item"><span class="service-dot"></span><small>Chrome</small><strong id="browserReady">—</strong></div>
+      <div class="service-item"><span class="service-dot"></span><small>OpenAI</small><strong id="openaiReady">—</strong></div>
+      <div class="service-item"><span class="service-dot"></span><small>Sheets</small><strong id="sheetsReady">—</strong></div>
+      <div class="service-item service-current"><small>Состояние</small><strong id="lastStatus">—</strong></div>
+    </section>
+
+    <div id="browserErrorBox" class="alert hidden"></div>
+    <div id="sheetsErrorBox" class="alert hidden"></div>
+    <div id="openaiErrorBox" class="alert hidden"></div>
+    <div id="openaiNoticeBox" class="alert info hidden"></div>
+
+    <section class="dashboard-card card">
+      <div class="current-work">
+        <div class="eyebrow">Сейчас обрабатывается</div>
+        <strong id="currentDomain">—</strong>
+        <span id="currentTitle">—</span>
+      </div>
+      <div class="counter-grid">
+        <div class="counter primary"><span>Осталось</span><strong id="countRemaining">0</strong></div>
+        <div class="counter"><span>Обработано</span><strong id="countProcessed">0</strong></div>
+        <div class="counter"><span>Всего</span><strong id="countTotal">0</strong></div>
+        <div class="counter success"><span>GOOD</span><strong id="countGood">0</strong></div>
+        <div class="counter warning"><span>Near</span><strong id="countNear">0</strong></div>
+        <div class="counter danger-text"><span>BAD</span><strong id="countBad">0</strong></div>
+        <div class="counter"><span>GOOD OLD</span><strong id="countOld">0</strong></div>
+        <div class="counter"><span>Not found</span><strong id="countNotFound">0</strong></div>
+        <div class="counter"><span>Ошибки</span><strong id="countErrors">0</strong></div>
+      </div>
+    </section>
+
+    <section class="workspace-grid">
+      <article class="card add-card">
+        <div class="card-head">
+          <div>
+            <div class="eyebrow">Новая задача</div>
+            <h2>Добавить пачку</h2>
+          </div>
+          <span class="badge" id="duplicateDbSize">0 дублей</span>
+        </div>
+
+        <label for="titleInput">Название пачки или источник выгрузки</label>
+        <input id="titleInput" type="text" placeholder="Например: HU export; !HU — ручная локаль" autocomplete="off">
+
+        <label for="domainsInput">Домены — по одному в строке</label>
+        <textarea id="domainsInput" placeholder="domain1.pl&#10;domain2.pl&#10;domain3.pl"></textarea>
+
+        <div class="form-actions">
+          <button id="addBatchBtn">Добавить в очередь</button>
+          <button id="clearBatchBtn" class="ghost">Очистить</button>
+        </div>
+        <p class="form-stats" id="loadStats">—</p>
+
+        <details class="duplicate-tool">
+          <summary>Удалить домены из базы дублей</summary>
+          <p>Вставьте домены, которые нужно разрешить для повторной проверки.</p>
+          <textarea id="duplicatesRemoveInput" placeholder="domain1.pl&#10;domain2.pl"></textarea>
+          <div class="form-actions">
+            <button id="removeDuplicatesBtn" type="button" class="danger">Удалить из дублей</button>
+            <button id="removeAndReuseBtn" type="button" class="secondary">Удалить и перенести выше</button>
+          </div>
+          <div id="duplicatesRemoveResult" class="tool-result muted"></div>
+        </details>
+
+        <div class="run-controls" aria-label="Управление проверкой">
+          <button id="startBtn" class="accent">Старт</button>
+          <button id="pauseBtn" class="secondary">Пауза</button>
+          <button id="stopBtn" class="danger">Стоп</button>
+          <button id="loginBtn" class="login-action">Продолжить после логина</button>
+        </div>
+        <details class="settings-drawer">
+          <summary>
+            <span>Настройки проверки</span>
+            <small>Strict, свежесть, модель</small>
+          </summary>
+          <div class="settings-body">
+            <label class="toggle-option" for="strictModeToggle">
+              <input id="strictModeToggle" type="checkbox">
+              <span>
+                <strong>Strict mode</strong>
+                <small>NEAR пропускает только если недостача не больше указанных значений</small>
+              </span>
+            </label>
+            <div class="strict-values">
+              <label for="strictUniqueDeficitInput">
+                <span>Недостача уникальных</span>
+                <input id="strictUniqueDeficitInput" type="number" min="0" max="50" step="1" value="1">
+              </label>
+              <label for="strictArticleDeficitInput">
+                <span>Недостача статейных</span>
+                <input id="strictArticleDeficitInput" type="number" min="0" max="50" step="1" value="1">
+              </label>
+            </div>
+            <label class="toggle-option" for="freshnessFilterToggle">
+              <input id="freshnessFilterToggle" type="checkbox" checked>
+              <span>
+                <strong>Свежесть ссылочного</strong>
+                <small>Стопит домен, если качественные ссылки слишком старые по URL/title/тексту открытых страниц</small>
+              </span>
+            </label>
+            <div class="strict-values">
+              <label for="freshnessCutoffYearInput">
+                <span>Считать старым до года</span>
+                <input id="freshnessCutoffYearInput" type="number" min="1990" max="2030" step="1" value="2016">
+              </label>
+              <label for="freshnessMaxOldShareInput">
+                <span>Макс. старых ссылок, %</span>
+                <input id="freshnessMaxOldShareInput" type="number" min="0" max="100" step="1" value="50">
+              </label>
+            </div>
+            <div class="model-setting">
+              <label for="qualityModelSelect">Модель AI-анализа</label>
+              <select id="qualityModelSelect">
+                <option value="gpt-5.6-sol">gpt-5.6-sol</option>
+                <option value="gpt-5.6-terra">gpt-5.6-terra</option>
+              </select>
+              <p>Применяется к следующим доменам. Локальные проверки до AI не меняются.</p>
+            </div>
+          </div>
+        </details>
+      </article>
+
+      <article class="card queue-card">
+        <div class="card-head queue-title-row">
+          <div>
+            <div class="eyebrow">Порядок обработки</div>
+            <h2>Очередь</h2>
+          </div>
+          <div class="muted" id="queueMeta">—</div>
+        </div>
+        <div id="queueGroupsBox" class="queue-groups"></div>
+      </article>
+    </section>
+
+    <section class="card results-card">
+      <div class="card-head">
+        <div>
+          <div class="eyebrow">Последние проверки</div>
+          <h2>Результаты</h2>
+        </div>
+        <span class="muted">Подробности причины доступны в строке</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Пачка</th>
+              <th>Домен</th>
+              <th>Итог</th>
+              <th>Локаль</th>
+              <th>AI</th>
+              <th>U/A/Home/Y</th>
+              <th>WebArchive</th>
+              <th>Причина итога</th>
+            </tr>
+          </thead>
+          <tbody id="resultsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <details class="card log-card">
+      <summary>
+        <span><span class="eyebrow">Диагностика</span><strong>Журнал работы</strong></span>
+        <button id="clearLogBtn" class="ghost small" type="button">Очистить вид</button>
+      </summary>
+      <pre id="logBox"></pre>
+    </details>
+  </main>
+
+  <dialog id="promptDialog" class="prompt-dialog">
+    <form method="dialog" class="dialog-shell">
+      <div class="dialog-head">
+        <div>
+          <div class="eyebrow">Применяются со следующей проверки</div>
+          <h2>Действующие промпты AI</h2>
+        </div>
+        <button id="closePromptBtn" class="icon-button ghost" value="cancel" aria-label="Закрыть">×</button>
+      </div>
+      <p class="dialog-note">Промпты хранятся в файлах проекта и сохраняются после сброса сессии. Основная выбранная модель проверяет анкоры, качество ссылок и содержимое открытых страниц; если включён отдельный быстрый скрининг, он используется только как ранний критический фильтр и не заменяет полноценную проверку.</p>
+      <div class="prompt-tabs" role="tablist">
+        <button type="button" class="prompt-tab" data-prompt-tab="screen" role="tab">Быстрый скрининг</button>
+        <button type="button" class="prompt-tab active" data-prompt-tab="link" role="tab">Ссылки и GOOD OLD</button>
+        <button type="button" class="prompt-tab" data-prompt-tab="article" role="tab">Проверка страниц</button>
+        <button type="button" class="prompt-tab" data-prompt-tab="anchor" role="tab">Fresh + Historic анкоры</button>
+      </div>
+      <section class="prompt-panel" data-prompt-panel="screen">
+        <label for="screenPromptInput">Промпт дешёвого критического скрининга</label>
+        <textarea id="screenPromptInput" class="prompt-textarea" spellcheck="false"></textarea>
+      </section>
+      <section class="prompt-panel active" data-prompt-panel="link">
+        <label for="linkPromptInput">Промпт классификации backlinks</label>
+        <textarea id="linkPromptInput" class="prompt-textarea" spellcheck="false"></textarea>
+      </section>
+      <section class="prompt-panel" data-prompt-panel="article">
+        <label for="articlePromptInput">Промпт подтверждения статьи по содержимому открытой страницы</label>
+        <textarea id="articlePromptInput" class="prompt-textarea" spellcheck="false"></textarea>
+      </section>
+      <section class="prompt-panel" data-prompt-panel="anchor">
+        <label for="anchorPromptInput">Промпт проверки Anchor Text</label>
+        <textarea id="anchorPromptInput" class="prompt-textarea" spellcheck="false"></textarea>
+      </section>
+      <div class="dialog-footer">
+        <span id="promptUpdatedAt" class="muted">—</span>
+        <div class="form-actions">
+          <button id="reloadPromptsBtn" type="button" class="secondary">Перечитать</button>
+          <button id="savePromptsBtn" type="button">Сохранить промпты</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <template id="removeDomainsTemplate">
+    <div class="remove-box">
+      <label>Домены для удаления из этой пачки</label>
+      <textarea class="remove-domains-input" placeholder="domain1.pl&#10;domain2.pl"></textarea>
+      <div class="form-actions">
+        <button class="confirm-remove-domains small danger">Убрать домены</button>
+        <button class="cancel-remove-domains small secondary">Отмена</button>
+      </div>
+    </div>
+  </template>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

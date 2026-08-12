@@ -1,0 +1,30 @@
+# Python/cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Local secrets and Google service account
+credentials.json
+.env
+*.env
+
+# Runtime state and user data
+majui.pid
+results.csv
+duplicates_drops.txt
+last_backlinks_debug.json
+
+# Local archives/shortcuts
+*.zip
+*.lnk
+
+# Local agent/cache folders
+.agents/
+
+# OS/editor noise
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/
