@@ -500,6 +500,68 @@ tbody tr.result-row-pinned:nth-child(even) {
 tbody tr.result-row-pinned:hover {
   background: linear-gradient(90deg, rgba(215, 173, 90, .18), #1a1d22 20%);
 }
+.domain-cell {
+  position: relative;
+  padding-right: 34px;
+}
+.domain-cell strong { color: var(--text-strong); }
+.copy-domain-button {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #7f8791;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%) scale(.9);
+  transition: opacity .12s ease, color .12s ease, background .12s ease, transform .12s ease;
+}
+.copy-domain-icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+  margin: auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.domain-cell:hover .copy-domain-button,
+.domain-cell:focus-within .copy-domain-button {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(-50%) scale(1);
+}
+.copy-domain-button:hover,
+.copy-domain-button:focus-visible {
+  background: #252a31;
+  color: #d4dae2;
+  outline: none;
+}
+.copy-domain-button:focus-visible { box-shadow: 0 0 0 1px #59616c; }
+.copy-domain-button.is-copied {
+  opacity: 1;
+  color: var(--success);
+  background: rgba(67, 181, 129, .12);
+}
+.copy-domain-button.is-copied .copy-domain-icon { display: none; }
+.copy-domain-button.is-copied::before {
+  content: "✓";
+  font-size: 13px;
+  font-weight: 900;
+}
+.copy-domain-button.copy-failed {
+  opacity: 1;
+  color: var(--danger);
+  pointer-events: auto;
+}
 .metric-cell { white-space: nowrap; }
 .metric-years {
   display: block;
@@ -641,4 +703,12 @@ tbody tr.result-row-pinned:hover {
   .dialog-footer { align-items: stretch; flex-direction: column; }
   .dialog-footer .form-actions { width: 100%; }
   .dialog-footer button { flex: 1; }
+}
+
+@media (hover: none) {
+  .copy-domain-button {
+    opacity: .75;
+    pointer-events: auto;
+    transform: translateY(-50%) scale(1);
+  }
 }

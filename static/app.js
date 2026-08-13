@@ -234,6 +234,25 @@ function deleteJSON(url) {
   return requestJSON(url, { method: "DELETE" });
 }
 
+async function copyTextToClipboard(value) {
+  const text = String(value || "").trim();
+  if (!text) return;
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("Clipboard API is unavailable");
+}
+
 function renderResults(rows) {
   const signature = JSON.stringify(rows);
   if (signature === lastResultsSignature) return;
@@ -263,7 +282,15 @@ function renderResults(rows) {
     tr.className = pinned ? "result-row-pinned" : "";
     tr.innerHTML = `
       <td>${escapeHtml(row.title || "")}</td>
-      <td><strong>${escapeHtml(row.domain || "")}</strong></td>
+      <td class="domain-cell">
+        <strong>${escapeHtml(row.domain || "")}</strong>
+        <button class="copy-domain-button" type="button" title="Скопировать домен" aria-label="Скопировать домен">
+          <svg class="copy-domain-icon" viewBox="0 0 16 16" aria-hidden="true">
+            <rect x="5.5" y="5.5" width="7.5" height="7.5" rx="1"></rect>
+            <path d="M10.5 5.5V3.8A1.3 1.3 0 0 0 9.2 2.5H3.8a1.3 1.3 0 0 0-1.3 1.3v5.4a1.3 1.3 0 0 0 1.3 1.3h1.7"></path>
+          </svg>
+        </button>
+      </td>
       <td class="${statusClass(row.status)}" title="${escapeHtml(row.status || "")}">${renderStatusValue(row.status || "", outcomeLabel)}</td>
       <td>${escapeHtml(locale)}</td>
       <td title="${escapeHtml(aiStatus)}">${renderStatusValue(aiStatus, aiLabel)}</td>
@@ -271,6 +298,26 @@ function renderResults(rows) {
       <td title="${escapeHtml(webarchiveStatus)}">${renderStatusValue(webarchiveStatus, webarchiveLabel)}</td>
       <td class="reason-cell" title="${escapeHtml(reasonText)}">${escapeHtml(reasonText)}</td>
     `;
+    const copyButton = tr.querySelector(".copy-domain-button");
+    copyButton.addEventListener("click", async () => {
+      try {
+        await copyTextToClipboard(row.domain);
+        copyButton.classList.remove("copy-failed");
+        copyButton.classList.add("is-copied");
+        copyButton.title = "Домен скопирован";
+        copyButton.setAttribute("aria-label", `Домен ${row.domain} скопирован`);
+        window.setTimeout(() => {
+          if (!copyButton.isConnected) return;
+          copyButton.classList.remove("is-copied");
+          copyButton.title = "Скопировать домен";
+          copyButton.setAttribute("aria-label", "Скопировать домен");
+        }, 1200);
+      } catch (error) {
+        copyButton.classList.add("copy-failed");
+        copyButton.title = "Не удалось скопировать";
+        copyButton.setAttribute("aria-label", "Не удалось скопировать домен");
+      }
+    });
     els.resultsBody.appendChild(tr);
   });
 }
