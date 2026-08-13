@@ -81,6 +81,15 @@ class WebArchiveSpamTests(unittest.TestCase):
         categories = {match.category for match in matches}
         self.assertIn("crypto/nft", categories)
 
+    def test_detects_branded_coin_rewards_archive_spam(self):
+        matches = scan_wayback_text(
+            "EthiCoin magyar startup. Az EthiCoin credittekkel vásárolható, "
+            "az app használatáért rewards járnak és minden séta után EthiCoin kapsz.",
+            locale="HU",
+        )
+        categories = {match.category for match in matches}
+        self.assertIn("crypto/nft", categories)
+
     def test_cjk_reuse_is_ignored_for_cjk_locale_only(self):
         text = "日本語のテキストです。" * 80
         self.assertFalse(scan_wayback_text(text, locale="JP"))

@@ -270,7 +270,11 @@ SPAM_PATTERNS: Sequence[tuple[str, re.Pattern[str]]] = (
             r"dogecoin|altcoin|memecoin|airdrop|binance|coinbase|web3|metaverse|"
             r"nft(?:s)?|token\s+(?:sale|airdrop|swap)|coin\s+(?:market|wallet|trading)|"
             r"(?:crypto|krypto)\s*(?:signals?|signale|trading|investment|investing)|"
-            r"(?:bitcoin|btc)\s*(?:signals?|trading|investment|investing))\b",
+            r"(?:bitcoin|btc)\s*(?:signals?|trading|investment|investing)|"
+            r"[a-z0-9]{2,}coins?\b.{0,160}\b(?:credits?|credittek|tokens?|rewards?|wallet|app|earn|spent|"
+            r"vásárolható|kapsz|ft-nyi|fenntarthat[óo])\b|"
+            r"\b(?:credits?|credittek|tokens?|rewards?|wallet|app|earn|spent|vásárolható|kapsz|ft-nyi|"
+            r"fenntarthat[óo])\b.{0,160}\b[a-z0-9]{2,}coins?)\b",
             re.IGNORECASE,
         ),
     ),

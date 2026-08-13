@@ -616,6 +616,7 @@ DOMAIN_NAME_HARD_STOP_PATTERNS: Sequence[tuple[str, re.Pattern[str]]] = (
             r"crypto(?!graphy)|cryptocurrency|bitcoin|bitcoins|(?:^|-)btc(?:-|$)|btc(?:coin|casino|market|wallet|trading)|"
             r"blockchain|ethereum|litecoin|dogecoin|altcoin|memecoin|(?:^|-)defi(?:-|$)|"
             r"airdrop|binance|coinbase|web3|metaverse|"
+            r"(?:^|-)[a-z0-9]{2,}coins?(?:-|$)|"
             r"(?:coin|token)(?:market|wallet|trading|swap|sale|airdrop)|"
             r"(?:^|-)nfts?(?:-|$)|(?:^|-)nft(?:coin|token|market|art|game|games)(?:-|$)?|"
             r"nft(?:coin|token|market|art|game|games)|(?:coin|token|market|art|game|games)nft"

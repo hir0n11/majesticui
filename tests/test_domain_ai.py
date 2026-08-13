@@ -190,11 +190,14 @@ class DomainAggregationTests(unittest.TestCase):
         self.assertEqual(local_domain_name_precheck("cakeptogel-login.org", "US").status, "BAD:DOMAIN_NAME")
         self.assertEqual(local_domain_name_precheck("situs-slot-gacor.net", "US").status, "BAD:DOMAIN_NAME")
         self.assertEqual(local_domain_name_precheck("erotikads-example.com", "DE").status, "BAD:DOMAIN_NAME")
+        self.assertEqual(local_domain_name_precheck("ethicoin.hu", "HU").status, "BAD:DOMAIN_NAME")
+        self.assertEqual(local_domain_name_precheck("green-rewardcoin.org", "HU").status, "BAD:DOMAIN_NAME")
 
     def test_domain_name_precheck_allows_normal_domain(self):
         self.assertIsNone(local_domain_name_precheck("civicalliance.org", "US"))
         self.assertIsNone(local_domain_name_precheck("zukunftskonferenz.live", "DE"))
         self.assertIsNone(local_domain_name_precheck("lecoincreatif.ch", "CH"))
+        self.assertIsNone(local_domain_name_precheck("coincreatif.ch", "CH"))
         self.assertIsNone(local_domain_name_precheck("newjerseyarts.org", "US"))
         self.assertIsNone(local_domain_name_precheck("cheapflightsmuseum.org", "US"))
         self.assertIsNone(local_domain_name_precheck("prudentialpropertyspecialists.com", "US"))
