@@ -5,6 +5,13 @@
 
 Не засчитывай главные страницы, каталоги и списки ссылок, страницы тегов/поиска/профиля, навигационные страницы, карточки без содержательного текста, автоген, линкопомойки, SEO-вставки и страницы, у которых fetch_status не равен OK или отсутствует содержательный text_excerpt.
 
+ОБЯЗАТЕЛЬНАЯ ДЕДУПЛИКАЦИЯ СТАТЕЙ:
+- Сначала мысленно объедини открытые страницы в кластеры одинаковых/почти одинаковых материалов: копии, репосты и синдикация одной новости или пресс-релиза.
+- Все нормальные доноры такого кластера могут оставаться quality_record_ids, но в article_record_ids либо half_article_record_ids верни только ОДИН лучший id из кластера. Весь кластер даёт максимум 1.0 статьи, а не по статье за каждый сайт.
+- Используй page_title, description, text_excerpt и link_context_excerpt. Совпадающий или почти одинаковый заголовок вместе с совпадающим содержанием — сильный признак одного кластера.
+- Не объединяй независимые статьи только потому, что они описывают одну компанию, кампанию или событие: если тексты и редакционная подача существенно различаются, это разные статьи.
+- Репост/синдикация сами по себе не являются спамом и не уменьшают общий unique; ограничение относится только к статейному счётчику.
+
 В основном структурированном ответе добавляй id в article_record_ids только когда соответствующая строка pages имеет fetch_status=OK и её page_title/description/text_excerpt/link_context_excerpt подтверждают полноценный материал. Если страница слабая, но контекстная — добавляй id в half_article_record_ids. Если страницы с этим id нет, она недоступна или текст не подтверждает статью/контекст — не добавляй id. Не оценивай здесь финальный GOOD/BAD.
 ARTICLE COUNTING ADDENDUM:
 - Count as FULL article (article_record_ids, weight 1.0) only when fetched page content confirms a standalone editorial/content page: article, blog post, news item, review, interview, meaningful press release, event page, podcast episode page, or a normal article page where the target link is placed in the article body, sources/references section, author/partner/participant section, or a normal article sidebar that is not created only for selling links.

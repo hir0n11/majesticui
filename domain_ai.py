@@ -243,7 +243,7 @@ def _enum_value(value: Any) -> str:
 
 
 def _syndicated_content_key(row: Dict[str, Any]) -> str:
-    """Collapse mirrored/syndicated copies of the same article across city/info portals."""
+    """Return a conservative cross-domain key for an apparent syndicated article."""
 
     raw_url = str(row.get("source_url") or "").strip()
     try:
@@ -265,9 +265,8 @@ def _syndicated_content_key(row: Dict[str, Any]) -> str:
 
 
 def _canonical_source_key(row: Dict[str, Any]) -> str:
-    syndicated_key = _syndicated_content_key(row)
-    if syndicated_key:
-        return syndicated_key
+    """Canonical key for one actual source page, without collapsing syndication."""
+
     domain = str(row.get("source_domain") or "").lower().removeprefix("www.")
     raw_url = str(row.get("source_url") or "").strip()
     try:
@@ -276,11 +275,136 @@ def _canonical_source_key(row: Dict[str, Any]) -> str:
         path = re.sub(r"/{2,}", "/", parsed.path or "/")
         if path != "/":
             path = path.rstrip("/")
-        query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)))
+        query = urlencode(
+            sorted(
+                (key, value)
+                for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                if not (
+                    key.casefold().startswith("utm_")
+                    or key.casefold()
+                    in {
+                        "fbclid",
+                        "gclid",
+                        "dclid",
+                        "yclid",
+                        "msclkid",
+                        "mc_cid",
+                        "mc_eid",
+                    }
+                )
+            )
+        )
         normalized_url = f"{host}{path}" + (f"?{query}" if query else "")
     except ValueError:
-        normalized_url = raw_url.lower().rstrip("/")
-    return f"{domain}|{normalized_url}"
+        normalized_url = f"{domain}|{raw_url.lower().rstrip('/')}"
+    return normalized_url
+
+
+def _article_words(value: Any) -> List[str]:
+    """Language-neutral words used only for conservative duplicate detection."""
+
+    return [
+        token
+        for token in re.findall(r"[^\W_]+", unquote(str(value or "")).casefold(), re.UNICODE)
+        if len(token) >= 3
+    ]
+
+
+def _article_shingles(value: Any, size: int = 5, limit: int = 260) -> set[tuple[str, ...]]:
+    words = _article_words(value)[:limit]
+    if len(words) < max(30, size * 3):
+        return set()
+    return {tuple(words[index : index + size]) for index in range(len(words) - size + 1)}
+
+
+def _article_rows_are_duplicates(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    """Detect copied/reposted articles without merging independent topical coverage."""
+
+    left_syndicated = _syndicated_content_key(left)
+    right_syndicated = _syndicated_content_key(right)
+    if left_syndicated and left_syndicated == right_syndicated:
+        return True
+
+    left_title = _article_words(left.get("source_title"))
+    right_title = _article_words(right.get("source_title"))
+    if len(left_title) >= 5 and len(right_title) >= 5:
+        if left_title == right_title:
+            return True
+        left_title_set = set(left_title)
+        right_title_set = set(right_title)
+        overlap = len(left_title_set & right_title_set)
+        smaller = min(len(left_title_set), len(right_title_set))
+        if overlap >= 6 and smaller and overlap / smaller >= 0.85:
+            return True
+
+    left_anchor = _article_words(left.get("anchor"))
+    right_anchor = _article_words(right.get("anchor"))
+    if len(left_anchor) >= 8 and len(right_anchor) >= 8:
+        left_anchor_set = set(left_anchor)
+        right_anchor_set = set(right_anchor)
+        overlap = len(left_anchor_set & right_anchor_set)
+        smaller = min(len(left_anchor_set), len(right_anchor_set))
+        title_topic_overlap = len(set(left_title) & set(right_title))
+        if (
+            overlap >= 8
+            and smaller
+            and overlap / smaller >= 0.85
+            and title_topic_overlap >= 3
+        ):
+            return True
+
+    left_shingles = _article_shingles(left.get("_article_page_text"))
+    right_shingles = _article_shingles(right.get("_article_page_text"))
+    if left_shingles and right_shingles:
+        overlap = len(left_shingles & right_shingles)
+        smaller = min(len(left_shingles), len(right_shingles))
+        if smaller and overlap / smaller >= 0.60:
+            return True
+    return False
+
+
+def clustered_article_metric(
+    rows: Iterable[Dict[str, Any]],
+    article_ids: Iterable[str],
+    half_article_ids: Iterable[str],
+) -> tuple[float, int]:
+    """Count one article unit per copied/syndicated cluster; preserve donor uniques."""
+
+    full_ids = set(map(str, article_ids))
+    half_ids = set(map(str, half_article_ids)) - full_ids
+    candidates: List[tuple[Dict[str, Any], float]] = []
+    seen_sources: set[str] = set()
+    for row in rows:
+        record_id = str(row.get("record_id") or "")
+        if record_id not in full_ids and record_id not in half_ids:
+            continue
+        source_key = _canonical_source_key(row)
+        if source_key in seen_sources:
+            continue
+        seen_sources.add(source_key)
+        candidates.append((row, 1.0 if record_id in full_ids else 0.5))
+
+    clusters: List[List[tuple[Dict[str, Any], float]]] = []
+    for candidate in candidates:
+        matching = [
+            index
+            for index, cluster in enumerate(clusters)
+            if any(_article_rows_are_duplicates(candidate[0], existing[0]) for existing in cluster)
+        ]
+        if not matching:
+            clusters.append([candidate])
+            continue
+        target = matching[0]
+        clusters[target].append(candidate)
+        for index in reversed(matching[1:]):
+            clusters[target].extend(clusters.pop(index))
+
+    cluster_weights = [max(weight for _, weight in cluster) for cluster in clusters]
+    full_units = sum(1.0 for weight in cluster_weights if weight >= 1.0)
+    half_units = sum(weight for weight in cluster_weights if 0 < weight < 1.0)
+    metric = _ceil_metric_number(full_units + min(2.0, half_units))
+    collapsed = max(0, len(candidates) - len(clusters))
+    return metric, collapsed
 
 
 def is_exact_homepage(target_url: str, domain: str) -> bool:
@@ -2330,8 +2454,8 @@ def aggregate_assessment(
         hard_stops.append("Исторические анкоры указывают на спам")
 
     unique_quality = 0
-    article_links = 0.0
-    half_article_units = 0.0
+    full_article_ids: set[str] = set()
+    half_counted_article_ids: set[str] = set()
     homepage_links = 0
     old_links = 0
     modern_links = 0
@@ -2362,9 +2486,9 @@ def aggregate_assessment(
         ):
             article_weight = max(0.0, min(1.0, _number(_value(item, "article_weight", 1.0))))
             if article_weight >= 1.0:
-                article_links += 1.0
+                full_article_ids.add(record_id)
             elif article_weight > 0:
-                half_article_units += article_weight
+                half_counted_article_ids.add(record_id)
         if is_exact_homepage(str(row.get("target_url") or ""), domain):
             homepage_links += 1
         source_years = backlink_source_years(row)
@@ -2381,7 +2505,16 @@ def aggregate_assessment(
         else:
             unknown_age_links += 1
 
-    article_links = _ceil_metric_number(article_links + min(2.0, half_article_units))
+    article_links, collapsed_article_copies = clustered_article_metric(
+        rows,
+        full_article_ids,
+        half_counted_article_ids,
+    )
+    if collapsed_article_copies:
+        warnings.append(
+            "Статейные копии/репосты объединены в кластеры; "
+            f"повторно не засчитано: {collapsed_article_copies}"
+        )
     missing_assessments = max(0, len(rows_by_id) - len(assessed_ids))
     if missing_assessments:
         warnings.append(f"Модель не классифицировала ссылок: {missing_assessments}; они не засчитаны")
@@ -3231,10 +3364,22 @@ class OpenAIDomainChecker:
                     )
                     for page in page_evidence
                 }
+                page_text_by_id = {
+                    str(page.get("id")): " ".join(
+                        str(page.get(field) or "")
+                        for field in ("page_title", "description", "text_excerpt", "link_context_excerpt")
+                    )
+                    for page in page_evidence
+                    if page.get("fetch_status") == "OK"
+                }
                 for row in batch_rows:
-                    years = page_years_by_id.get(str(row.get("record_id") or ""))
+                    record_id = str(row.get("record_id") or "")
+                    years = page_years_by_id.get(record_id)
                     if years:
                         row["page_years"] = years
+                    page_text = page_text_by_id.get(record_id, "").strip()
+                    if page_text:
+                        row["_article_page_text"] = page_text
                 payload["page_columns"] = [
                     "id",
                     "fetch_status",
@@ -3444,9 +3589,14 @@ class OpenAIDomainChecker:
                         )
                     break
 
+                current_article_metric, _ = clustered_article_metric(
+                    assessed_rows,
+                    article_ids,
+                    half_article_ids,
+                )
                 if (
                     len(quality_ids) >= required_unique
-                    and _ceil_metric_number(len(article_ids) + min(2.0, len(half_article_ids) * 0.5)) >= required_articles
+                    and current_article_metric >= required_articles
                     and freshness_safe_for_early_exit
                 ):
                     # Do not accept a partial profile whose unprocessed inner
@@ -3465,7 +3615,7 @@ class OpenAIDomainChecker:
 
                 if (
                     len(quality_ids) + remaining < near_unique
-                    or _ceil_metric_number(len(article_ids) + min(2.0, len(half_article_ids) * 0.5) + remaining) < near_articles
+                    or _ceil_metric_number(current_article_metric + remaining) < near_articles
                 ):
                     early_stop_stage = "near_threshold_impossible"
                     if remaining:
@@ -3484,15 +3634,20 @@ class OpenAIDomainChecker:
             }
             browser_limit = int(getattr(self, "max_browser_article_pages", 0) or 0)
             browser_attempts = min(browser_limit, len(browser_fallback_rows))
+            current_article_metric, _ = clustered_article_metric(
+                assessed_rows,
+                article_ids,
+                half_article_ids,
+            )
             can_browser_reach_good = (
                 required_articles > 0
-                and _ceil_metric_number(len(article_ids) + min(2.0, len(half_article_ids) * 0.5)) < required_articles
-                and _ceil_metric_number(len(article_ids) + min(2.0, len(half_article_ids) * 0.5) + browser_attempts) >= required_articles
+                and current_article_metric < required_articles
+                and _ceil_metric_number(current_article_metric + browser_attempts) >= required_articles
             )
             can_browser_reach_near = (
                 required_articles > 0
-                and _ceil_metric_number(len(article_ids) + min(2.0, len(half_article_ids) * 0.5)) < near_articles
-                and _ceil_metric_number(len(article_ids) + min(2.0, len(half_article_ids) * 0.5) + browser_attempts) >= near_articles
+                and current_article_metric < near_articles
+                and _ceil_metric_number(current_article_metric + browser_attempts) >= near_articles
             )
             if (
                 browser_page_fetcher is not None
@@ -3526,10 +3681,22 @@ class OpenAIDomainChecker:
                     )
                     for page in browser_pages
                 }
+                browser_page_text_by_id = {
+                    str(page.get("id")): " ".join(
+                        str(page.get(field) or "")
+                        for field in ("page_title", "description", "text_excerpt", "link_context_excerpt")
+                    )
+                    for page in browser_pages
+                    if page.get("fetch_status") == "OK"
+                }
                 for row in fallback_rows:
-                    years = browser_page_years_by_id.get(str(row.get("record_id") or ""))
+                    record_id = str(row.get("record_id") or "")
+                    years = browser_page_years_by_id.get(record_id)
                     if years:
                         row["page_years"] = years
+                    page_text = browser_page_text_by_id.get(record_id, "").strip()
+                    if page_text:
+                        row["_article_page_text"] = page_text
                 if browser_accessible_ids:
                     fallback_payload = compact_backlink_batch(
                         domain,

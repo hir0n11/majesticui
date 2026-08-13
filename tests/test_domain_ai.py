@@ -15,6 +15,7 @@ from domain_ai import (
     combine_staged_assessments,
     compact_historic_pages_payload,
     collect_article_page_evidence,
+    clustered_article_metric,
     extract_article_page_preview,
     extract_explicit_years,
     is_seo_noise_only_reason,
@@ -556,11 +557,112 @@ class DomainAggregationTests(unittest.TestCase):
             }
             for i in range(1, 8)
         ]
-        self.assertEqual(len(unique_backlinks(rows)), 1)
+        self.assertEqual(len(unique_backlinks(rows)), 7)
         result = aggregate_assessment("koradracing.hu", "HU", rows, assessment_for(rows, articles=7, locale="HU"))
-        self.assertEqual(result.unique_quality, 1)
+        self.assertEqual(result.unique_quality, 7)
         self.assertEqual(result.article_links, 1)
         self.assertEqual(result.status, "BAD:LOW_PROFILE")
+
+    def test_same_article_title_on_different_donors_preserves_unique_but_caps_articles(self):
+        rows = make_rows(9, domain="drop.de")
+        for index, row in enumerate(rows, start=1):
+            row.update(
+                source_domain=f"news{index}.example",
+                source_url=f"https://news{index}.example/local/path-{index}",
+                source_title="Government announces the same regional consumer voucher programme",
+                target_url="https://drop.de/",
+            )
+        result = aggregate_assessment(
+            "drop.de",
+            "DE",
+            rows,
+            assessment_for(rows, articles=9, locale="DE"),
+        )
+        self.assertEqual(result.unique_quality, 9)
+        self.assertEqual(result.article_links, 1)
+        self.assertEqual(result.status, "BAD:LOW_PROFILE")
+        self.assertTrue(any("копии/репосты" in warning for warning in result.warnings))
+
+    def test_near_identical_fetched_text_caps_article_cluster(self):
+        rows = make_rows(9, domain="drop.de")
+        copied_text = " ".join(
+            [
+                "The regional government announced a consumer voucher programme for local shops",
+                "Applications open in April and participating businesses receive the same conditions",
+                "The campaign supports commerce throughout the islands with a shared public platform",
+            ]
+            * 8
+        )
+        for index, row in enumerate(rows[:5], start=1):
+            row["source_title"] = f"Regional commerce update number {index}"
+            row["_article_page_text"] = copied_text + f" publisher footer {index}"
+            row["target_url"] = "https://drop.de/"
+        for row in rows[5:]:
+            row["target_url"] = "https://drop.de/"
+        metric, collapsed = clustered_article_metric(
+            rows,
+            [f"M{i}" for i in range(1, 6)],
+            [],
+        )
+        self.assertEqual(metric, 1)
+        self.assertEqual(collapsed, 4)
+
+    def test_repeated_long_article_anchor_caps_cluster_when_pages_are_blocked(self):
+        rows = make_rows(5, domain="drop.de")
+        repeated_context = (
+            "The voucher purchase works like the previous edition and the campaign "
+            "will run for two months through the same public platform"
+        )
+        for index, row in enumerate(rows, start=1):
+            row.update(
+                source_domain=f"regional{index}.example",
+                source_url=f"https://regional{index}.example/news/{index}",
+                source_title=f"Regional commerce voucher publication {index}",
+                anchor=repeated_context,
+            )
+        metric, collapsed = clustered_article_metric(
+            rows,
+            ["M1", "M2", "M3", "M4", "M5"],
+            [],
+        )
+        self.assertEqual(metric, 1)
+        self.assertEqual(collapsed, 4)
+
+    def test_same_campaign_with_different_editorial_titles_is_not_auto_clustered(self):
+        rows = make_rows(4, domain="drop.de")
+        titles = [
+            "Applications open for the Canary Islands consumer voucher programme",
+            "Local shops report four million euros redeemed through island vouchers",
+            "Merchants explain eligibility rules for the new regional commerce campaign",
+            "Second edition of public support scheme receives government funding",
+        ]
+        for row, source_title in zip(rows, titles):
+            row["source_title"] = source_title
+        metric, collapsed = clustered_article_metric(
+            rows,
+            ["M1", "M2", "M3", "M4"],
+            [],
+        )
+        self.assertEqual(metric, 4)
+        self.assertEqual(collapsed, 0)
+
+    def test_tracking_query_variants_are_one_source_page(self):
+        rows = make_rows(2)
+        rows[0].update(
+            source_domain="news.example",
+            source_url="http://www.news.example/article/?utm_source=feed&fbclid=abc",
+        )
+        rows[1].update(
+            source_domain="news.example",
+            source_url="https://news.example/article",
+        )
+        self.assertEqual(len(unique_backlinks(rows)), 1)
+
+    def test_functional_query_pages_remain_separate_unique_sources(self):
+        rows = make_rows(2)
+        rows[0].update(source_domain="news.example", source_url="https://news.example/?p=101")
+        rows[1].update(source_domain="news.example", source_url="https://news.example/?p=202")
+        self.assertEqual(len(unique_backlinks(rows)), 2)
 
     def test_nonspam_reference_page_counts_as_unique_even_when_not_article(self):
         rows = make_rows(6, domain="drop.de")
@@ -772,8 +874,8 @@ class DomainAggregationTests(unittest.TestCase):
 
     def test_local_precheck_never_rejects_for_unknown_article_count(self):
         rows = make_rows(6, domain="drop.de")
-        for row in rows:
-            row["source_url"] = "https://donor.example/"
+        for index, row in enumerate(rows, start=1):
+            row["source_url"] = f"https://donor{index}.example/"
             row["source_title"] = "Directory"
             row["outbound_external"] = 149
             row["external_domains"] = 74
@@ -1276,13 +1378,16 @@ class DomainAggregationTests(unittest.TestCase):
             raise AssertionError(f"unexpected schema: {text_format}")
 
         def fake_browser_fetch(url, max_chars):
+            article_token = url.rstrip("/").rsplit("/", 1)[-1].replace("-", "")
             return {
                 "status": "OK",
                 "http_status": 0,
                 "final_url": url,
-                "page_title": "Browser article",
-                "description": "Article description",
-                "text_excerpt": "Long editorial article text " * 20,
+                "page_title": f"Browser article {article_token}",
+                "description": f"Independent description {article_token}",
+                "text_excerpt": " ".join(
+                    f"{article_token}word{index}" for index in range(80)
+                ),
                 "error": "",
             }
 
@@ -1769,6 +1874,116 @@ class DomainAggregationTests(unittest.TestCase):
         self.assertEqual(models, ["test-luna", "test-sol"])
         self.assertEqual(verdict.model, "test-luna → test-sol")
         self.assertTrue(any("Быстрый скрининг" in warning for warning in verdict.warnings))
+
+    def test_staged_checker_does_not_early_accept_copied_article_cluster(self):
+        checker = OpenAIDomainChecker.__new__(OpenAIDomainChecker)
+        checker.client = object()
+        checker.last_error = ""
+        checker.model_notice = ""
+        checker._model_access_checked = True
+        checker.model = "test-terra"
+        checker.screen_model = "test-luna"
+        checker.reasoning_effort = ""
+        checker.max_risk_anchors = 100
+        checker.batch_max_output_tokens = 2500
+        checker.batch_size = 10
+        checker.enable_luna_screen = False
+        checker.fetch_page_content = True
+        checker.max_article_pages = 12
+        checker.max_browser_article_pages = 0
+        checker.article_text_chars = 1200
+        checker.freshness_filter_enabled = False
+
+        def fake_parse(prompt, payload, text_format, max_output_tokens, model_name=None):
+            ids = [str(row[0]) for row in payload["rows"]]
+            common = dict(
+                pbn_risk="CLEAN",
+                pbn_reasons=[],
+                hard_stop_reasons=[],
+                quality_record_ids=ids,
+                article_record_ids=ids,
+                old_record_ids=[],
+                modern_record_ids=ids,
+                borderline_record_ids=[],
+                fresh_record_ids=[],
+                unknown_age_record_ids=[],
+                spam_record_ids=[],
+            )
+            if text_format is FirstBatchAssessment:
+                return (
+                    FirstBatchAssessment(
+                        locale="DE",
+                        language="de",
+                        topic="regional news",
+                        anchor_risk="CLEAN",
+                        anchor_reasons=[],
+                        **common,
+                    ),
+                    100,
+                    20,
+                )
+            if text_format is LinkBatchAssessment:
+                return LinkBatchAssessment(**common), 100, 20
+            raise AssertionError(f"unexpected schema: {text_format}")
+
+        def fake_page_evidence(batch_rows, candidate_ids, max_pages, max_chars):
+            pages = []
+            for row in batch_rows:
+                record_id = str(row["record_id"])
+                number = int(record_id.removeprefix("M"))
+                if number <= 10:
+                    page_title = "Same regional voucher press release published across portals"
+                    text = "copied regional voucher campaign conditions participating merchants " * 40
+                else:
+                    page_title = f"Article {number}"
+                    text = " ".join(f"donor{number}word{index}" for index in range(100))
+                pages.append(
+                    {
+                        "id": record_id,
+                        "fetch_status": "OK",
+                        "http_status": 200,
+                        "page_title": page_title,
+                        "description": "",
+                        "text_excerpt": text,
+                        "target_link_found": True,
+                        "target_link_texts": ["target"],
+                        "link_dom_area": "content",
+                        "link_context_excerpt": text[:300],
+                        "external_links_count": 1,
+                        "visible_text_chars": len(text),
+                        "external_link_density": 0.01,
+                    }
+                )
+            return pages, 0
+
+        checker._parse = fake_parse
+        rows = [
+            {
+                "source_domain": f"donor{i}.de",
+                "source_url": f"https://donor{i}.de/article-{i}",
+                "source_title": (
+                    "Same regional voucher press release published across portals"
+                    if i <= 10
+                    else f"Article {i}"
+                ),
+                "source_topic": "News",
+                "target_url": "https://drop.de/",
+            }
+            for i in range(1, 21)
+        ]
+        with patch("domain_ai.collect_article_page_evidence", side_effect=fake_page_evidence):
+            verdict = checker.evaluate(
+                "drop.de",
+                "DE",
+                {"rows": rows},
+                {"rows": [{"anchor": "brand"}]},
+                {"rows": [{"anchor": "old brand"}]},
+            )
+        self.assertEqual(verdict.status, "GOOD")
+        self.assertEqual(verdict.api_calls, 2)
+        self.assertEqual(verdict.backlinks_sent, 20)
+        self.assertEqual(verdict.article_links, 11)
+        self.assertEqual(verdict.early_stop_stage, "strict_threshold_reached")
 
     def test_staged_checker_freshness_early_exit_uses_configured_old_share_name(self):
         checker = OpenAIDomainChecker.__new__(OpenAIDomainChecker)
