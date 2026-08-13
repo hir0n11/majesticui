@@ -23,10 +23,13 @@ GOOD_OLD
 
 Пиши anchor_reasons и hard_stop_reasons максимально кратко по-русски. Эти правила относятся к anchors; первую пачку ссылок классифицируй по приложенному отдельному блоку. Финальный GOOD/BAD не вычисляй.
 LOCALE DETECTION RULES:
-- locale must describe the real country/market of the checked domain/project, not the batch name and not automatically the backlink donors' country.
+- locale must describe the target market/audience used for thresholds, not the owner/developer nationality, company-registration country, batch name, or donor country.
 - Treat locale_hint as a weak export/source hint only. Ignore it when domain context points elsewhere.
-- Infer locale from anchors plus available backlink/domain context in combined requests: domain name, source titles, source URLs, language, city/country names, organization names, event/business/project context.
+- In a combined request, prioritize webarchive_locale_samples when present, then infer from anchors plus available backlink/domain context: audience/service area, language, currency/prices, contact details in context, domain name, source titles, source URLs, city/country names, organization names, event/business/project context.
 - For generic TLDs (.com/.org/.net/.info/etc.), actively look for country evidence. If the project/business/event is clearly tied to a country, return that ISO-2 country code.
+- An English-only international game/app/software is locale=EN even if the developer is a Lithuanian UAB or legal jurisdiction is Lithuania. Put LT into country_origin if certain; owner origin alone does not confirm the market.
 - German language alone is not DE. Distinguish DE/AT/CH by concrete cues: Berlin/Hamburg/Munich/Germany => DE; Wien/Vienna/Österreich/Austria/Graz/Salzburg/Linz/Innsbruck => AT; Schweiz/Suisse/Swiss/Zürich/Geneva/Lausanne/Bern/Basel => CH.
 - EN is allowed as a special non-country locale when the profile is clearly English/international and no country is dominant. Do not force US/UK/AU from English language alone.
-- Return locale_evidence as a very short Russian explanation of the strongest locale signals, e.g. "Berlin + немецкие винодельни/доноры" or "английский международный профиль без страны".
+- Return country_origin separately as an uppercase two-letter ISO-2 country code (for example LT or AT), or an empty string when unknown. Return locale_confidence as LOW/MEDIUM/HIGH, and locale_market_confirmed=true only for direct target-market evidence. Registered office, legal form, developer/publisher origin, or donor geography alone require false.
+- For a reduced-threshold locale on a generic TLD, locale_evidence must explicitly connect that country to its audience/market (for example "LT market: Lithuanian-language site for Vilnius customers"). Do not confirm it when the same evidence says international/global/English-only.
+- Return locale_evidence as a very short Russian explanation of target-market signals, e.g. "Berlin + локальная немецкая аудитория" or "английская международная игра; владелец LT, но рынок не LT".

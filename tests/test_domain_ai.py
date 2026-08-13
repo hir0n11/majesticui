@@ -25,6 +25,7 @@ from domain_ai import (
     local_source_age_precheck,
     prepare_evidence,
     near_thresholds_for_locale,
+    resolve_assessed_locale_with_source,
     resolve_locale_with_source,
     scan_anchor_hard_stops,
     sanitize_seo_only_batch,
@@ -217,8 +218,170 @@ class DomainAggregationTests(unittest.TestCase):
 
     def test_aggregate_locale_can_be_selected_by_ai_over_tld(self):
         rows = make_rows(7, domain="drop.de")
-        data = assessment_for(rows, locale="LT")
+        data = assessment_for(
+            rows,
+            locale="LT",
+            locale_evidence="Lithuanian-language service for customers in Lithuania",
+            locale_confidence="HIGH",
+            locale_market_confirmed=True,
+        )
         result = aggregate_assessment("drop.de", "TEST", rows, data)
+        self.assertEqual(result.locale, "LT")
+        self.assertEqual(result.locale_source, "AI")
+        self.assertEqual(result.status, "GOOD")
+
+    def test_unconfirmed_soft_locale_cannot_override_country_tld(self):
+        rows = make_rows(9, domain="drop.de")
+        data = assessment_for(
+            rows,
+            articles=5,
+            locale="LT",
+            language="EN",
+            country_origin="LT",
+            locale_market_confirmed=False,
+        )
+        result = aggregate_assessment("drop.de", "TEST", rows, data)
+        self.assertEqual(result.locale, "DE")
+        self.assertEqual(result.locale_source, "AI_GUARD")
+
+    def test_generic_global_game_does_not_use_developer_country_as_market(self):
+        rows = make_rows(12, domain="projectzerodeaths.com")
+        data = assessment_for(
+            rows,
+            articles=2,
+            locale="LT",
+            language="EN",
+            country_origin="LT",
+            locale_confidence="HIGH",
+            locale_market_confirmed=False,
+            locale_evidence="English global game; developer is Lithuanian UAB Detis",
+        )
+
+        self.assertEqual(
+            resolve_assessed_locale_with_source("HU", "projectzerodeaths.com", data),
+            ("EN", "AI_GUARD"),
+        )
+        result = aggregate_assessment(
+            "projectzerodeaths.com",
+            "HU",
+            rows,
+            data,
+            archive_locale_samples=[
+                {
+                    "timestamp": "20190801000000",
+                    "title": "Project Zero Deaths",
+                    "excerpt": "English multiplayer game for Steam, iOS and Android. Developer: UAB Detis.",
+                }
+            ],
+        )
+        self.assertEqual(result.locale, "EN")
+        self.assertEqual(result.country_origin, "LT")
+        self.assertEqual(result.locale_source, "AI_GUARD+ARCHIVE")
+        self.assertEqual(result.required_articles, 5)
+        self.assertEqual(result.status, "BAD:LOW_PROFILE")
+
+    def test_developer_only_evidence_cannot_confirm_soft_market_on_generic_tld(self):
+        rows = make_rows(12, domain="projectzerodeaths.com")
+        data = assessment_for(
+            rows,
+            articles=2,
+            locale="LT",
+            language="EN",
+            country_origin="LT",
+            locale_confidence="HIGH",
+            # Deliberately reproduce the dangerous model combination: the
+            # boolean says market, but the explanation proves only origin.
+            locale_market_confirmed=True,
+            locale_evidence="Developer and publisher: Lithuanian UAB Detis",
+        )
+
+        self.assertEqual(
+            resolve_assessed_locale_with_source("HU", "projectzerodeaths.com", data),
+            ("EN", "AI_GUARD"),
+        )
+        result = aggregate_assessment("projectzerodeaths.com", "HU", rows, data)
+        self.assertEqual(result.locale, "EN")
+        self.assertFalse(result.locale_market_confirmed)
+        self.assertEqual(result.required_unique, 9)
+        self.assertEqual(result.required_articles, 5)
+        self.assertEqual(result.status, "BAD:LOW_PROFILE")
+
+    def test_soft_market_confirmation_rejects_origin_and_international_contradictions(self):
+        rows = make_rows(12, domain="projectzerodeaths.com")
+        rejected_evidence = (
+            "Lithuanian developer UAB Detis; target audience is international",
+            "Developer LT; serves global users",
+            "UAB LT; game is available in English only",
+            "Lithuanian UAB developer; game is available in English",
+            "Service is for users outside Lithuania",
+            "Lithuanian developer; customers and market are in Germany",
+            "Lithuanian developer; market and customers are in japan",
+            "Lithuanian developer; Japanese customers and market",
+            "Lithuanian developer; website for Tokyo residents",
+            "Project is based in Vilnius, Lithuania",
+            "Lithuanian team created the project",
+            "LT origin; English international game",
+        )
+        for evidence in rejected_evidence:
+            with self.subTest(evidence=evidence):
+                data = assessment_for(
+                    rows,
+                    articles=2,
+                    locale="LT",
+                    language="EN",
+                    country_origin="LT",
+                    locale_confidence="HIGH",
+                    locale_market_confirmed=True,
+                    locale_evidence=evidence,
+                )
+                self.assertEqual(
+                    resolve_assessed_locale_with_source("HU", "projectzerodeaths.com", data),
+                    ("EN", "AI_GUARD"),
+                )
+
+    def test_soft_market_confirmation_accepts_country_bound_audience_evidence(self):
+        rows = make_rows(7, domain="local-service.com")
+        accepted_evidence = (
+            "LT market: Lithuanian-language site for Vilnius customers",
+            "Lithuanian UAB; Vilnius address; Lithuanian site for local residents",
+            "Local service in Lithuania with Lithuanian prices and delivery",
+            "International company; Lithuanian-language local service for Vilnius residents",
+            "Lithuanian market for local residents, not an international audience",
+            "Vilnius municipal portal in Lithuanian",
+            "литовский язык и локальная аудитория",
+            "Global organization founded abroad. It now runs a Lithuanian-language portal for Vilnius residents",
+            "Not global: Lithuanian-language site for Vilnius users",
+            "Without international distribution; Lithuanian service for local residents",
+            "No English content; Lithuanian site for Vilnius customers",
+        )
+        for evidence in accepted_evidence:
+            with self.subTest(evidence=evidence):
+                data = assessment_for(
+                    rows,
+                    locale="LT",
+                    language="LT",
+                    country_origin="LT",
+                    locale_confidence="HIGH",
+                    locale_market_confirmed=True,
+                    locale_evidence=evidence,
+                )
+                self.assertEqual(
+                    resolve_assessed_locale_with_source("HU", "local-service.com", data),
+                    ("LT", "AI"),
+                )
+
+    def test_generic_lithuanian_market_keeps_reduced_threshold_when_confirmed(self):
+        rows = make_rows(7, domain="local-service.com")
+        data = assessment_for(
+            rows,
+            locale="LT",
+            language="LT",
+            country_origin="LT",
+            locale_confidence="HIGH",
+            locale_market_confirmed=True,
+            locale_evidence="Lithuanian-language local service with Vilnius address and Lithuanian prices",
+        )
+        result = aggregate_assessment("local-service.com", "HU", rows, data)
         self.assertEqual(result.locale, "LT")
         self.assertEqual(result.locale_source, "AI")
         self.assertEqual(result.status, "GOOD")
@@ -242,6 +405,18 @@ class DomainAggregationTests(unittest.TestCase):
         result = aggregate_assessment("global-review.com", "GNAME", rows, data)
         self.assertEqual(result.locale, "EN")
         self.assertEqual(result.locale_source, "LANGUAGE")
+
+    def test_generic_domain_donor_country_does_not_unlock_reduced_threshold(self):
+        rows = make_rows(7, domain="international-project.com")
+        for index, row in enumerate(rows):
+            row["source_domain"] = f"donor-{index}.pl"
+            row["source_url"] = f"https://donor-{index}.pl/polska-warszawa-project"
+        data = assessment_for(rows, articles=2, locale="", language="unknown")
+        result = aggregate_assessment("international-project.com", "HU", rows, data)
+        self.assertEqual(result.locale, "OTHER")
+        self.assertEqual(result.required_unique, 9)
+        self.assertEqual(result.required_articles, 5)
+        self.assertEqual(result.status, "BAD:LOW_PROFILE")
 
     def test_near_threshold_allows_three_unique_and_two_articles_deficit(self):
         rows = make_rows(6, domain="drop.de")
@@ -2036,6 +2211,10 @@ class DomainAggregationTests(unittest.TestCase):
                 return (
                     AnchorScreenAssessment(
                         locale="LT",
+                        locale_evidence="Lithuanian-language site for a Lithuanian audience",
+                        locale_confidence="high",
+                        locale_market_confirmed=True,
+                        country_origin="LT",
                         language="lt",
                         topic="brand",
                         anchor_risk="CLEAN",
@@ -2082,6 +2261,177 @@ class DomainAggregationTests(unittest.TestCase):
         self.assertEqual(verdict.backlinks_sent, 7)
         self.assertEqual(verdict.input_tokens, 280)
         self.assertEqual(calls, [AnchorScreenAssessment, LinkBatchAssessment])
+
+    def test_soft_locale_from_anchor_only_is_rechecked_for_generic_tld(self):
+        checker = OpenAIDomainChecker.__new__(OpenAIDomainChecker)
+        checker.client = object()
+        checker.last_error = ""
+        checker.model_notice = ""
+        checker._model_access_checked = True
+        checker.screen_model = "test-luna"
+        checker.model = "test-terra"
+        checker.screen_max_output_tokens = 900
+        checker.batch_max_output_tokens = 2500
+        checker.anchor_precheck_max_output_tokens = 700
+        checker.batch_size = 20
+        checker.max_risk_anchors = 100
+        checker.enable_luna_screen = False
+        checker.enable_sol_anchor_precheck = True
+        checker.fetch_page_content = False
+        calls = []
+
+        def fake_parse(prompt, payload, text_format, max_output_tokens, model_name=None):
+            calls.append(text_format)
+            if text_format is AnchorScreenAssessment:
+                return (
+                    AnchorScreenAssessment(
+                        locale="LT",
+                        locale_evidence="Lithuanian company name in anchors",
+                        locale_confidence="HIGH",
+                        locale_market_confirmed=True,
+                        country_origin="LT",
+                        language="EN",
+                        topic="multiplayer game",
+                        anchor_risk="CLEAN",
+                        anchor_reasons=[],
+                        hard_stop_reasons=[],
+                        summary="clean",
+                        warnings=[],
+                    ),
+                    80,
+                    8,
+                )
+            if text_format is FirstBatchAssessment:
+                self.assertIn("anchors", payload)
+                ids = [str(row[0]) for row in payload["rows"]]
+                return (
+                    FirstBatchAssessment(
+                        locale="EN",
+                        locale_evidence="English international game without a dominant country market",
+                        locale_confidence="HIGH",
+                        locale_market_confirmed=False,
+                        country_origin="LT",
+                        language="EN",
+                        topic="multiplayer game",
+                        anchor_risk="CLEAN",
+                        anchor_reasons=[],
+                        pbn_risk="CLEAN",
+                        pbn_reasons=[],
+                        hard_stop_reasons=[],
+                        quality_record_ids=ids,
+                        article_record_ids=[],
+                        old_record_ids=[],
+                        modern_record_ids=ids,
+                        borderline_record_ids=[],
+                        fresh_record_ids=[],
+                        unknown_age_record_ids=[],
+                        spam_record_ids=[],
+                    ),
+                    200,
+                    30,
+                )
+            raise AssertionError(f"unexpected schema: {text_format}")
+
+        checker._parse = fake_parse
+        verdict = checker.evaluate(
+            "projectzerodeaths.com",
+            "HU",
+            {"rows": make_rows(9, domain="projectzerodeaths.com")},
+            {"rows": [{"anchor": "Project Zero Deaths", "referring_domains": 5}]},
+            {"rows": [{"anchor": "best online casino bonus", "referring_domains": 1}]},
+        )
+
+        self.assertEqual(calls, [AnchorScreenAssessment, FirstBatchAssessment])
+        self.assertEqual(verdict.api_calls, 2)
+        self.assertEqual(verdict.locale, "EN")
+        self.assertEqual(verdict.required_articles, 5)
+
+    def test_unconfirmed_lt_on_generic_domain_does_not_stop_at_soft_threshold(self):
+        checker = OpenAIDomainChecker.__new__(OpenAIDomainChecker)
+        checker.client = object()
+        checker.last_error = ""
+        checker.model_notice = ""
+        checker._model_access_checked = True
+        checker.screen_model = "test-luna"
+        checker.model = "test-terra"
+        checker.screen_max_output_tokens = 900
+        checker.batch_max_output_tokens = 2500
+        checker.batch_size = 7
+        checker.max_risk_anchors = 100
+        checker.enable_luna_screen = False
+        checker.enable_sol_anchor_precheck = False
+        checker.fetch_page_content = False
+        calls = []
+
+        def fake_parse(prompt, payload, text_format, max_output_tokens, model_name=None):
+            calls.append(text_format)
+            ids = [str(row[0]) for row in payload["rows"]]
+            if text_format is FirstBatchAssessment:
+                return (
+                    FirstBatchAssessment(
+                        locale="LT",
+                        locale_evidence="English global game; developer is Lithuanian UAB",
+                        locale_confidence="high",
+                        locale_market_confirmed=False,
+                        country_origin="LT",
+                        language="EN",
+                        topic="international multiplayer game",
+                        anchor_risk="CLEAN",
+                        anchor_reasons=[],
+                        pbn_risk="CLEAN",
+                        pbn_reasons=[],
+                        hard_stop_reasons=[],
+                        quality_record_ids=ids,
+                        article_record_ids=[],
+                        old_record_ids=[],
+                        modern_record_ids=ids,
+                        borderline_record_ids=[],
+                        fresh_record_ids=[],
+                        unknown_age_record_ids=[],
+                        spam_record_ids=[],
+                    ),
+                    200,
+                    30,
+                )
+            if text_format is LinkBatchAssessment:
+                return (
+                    LinkBatchAssessment(
+                        pbn_risk="CLEAN",
+                        pbn_reasons=[],
+                        hard_stop_reasons=[],
+                        quality_record_ids=ids,
+                        article_record_ids=[],
+                        old_record_ids=[],
+                        modern_record_ids=ids,
+                        borderline_record_ids=[],
+                        fresh_record_ids=[],
+                        unknown_age_record_ids=[],
+                        spam_record_ids=[],
+                    ),
+                    160,
+                    20,
+                )
+            raise AssertionError(f"unexpected schema: {text_format}")
+
+        checker._parse = fake_parse
+        rows = make_rows(12, domain="projectzerodeaths.com")
+        for row in rows:
+            row["target_url"] = "https://projectzerodeaths.com/"
+        verdict = checker.evaluate(
+            "projectzerodeaths.com",
+            "HU",
+            {"rows": rows},
+            {"rows": [{"anchor": "Project Zero Deaths", "referring_domains": 5}]},
+            {"rows": [{"anchor": "projectzerodeaths.com", "referring_domains": 8}]},
+        )
+
+        self.assertEqual(calls, [FirstBatchAssessment, LinkBatchAssessment])
+        self.assertEqual(verdict.api_calls, 2)
+        self.assertEqual(verdict.backlinks_sent, 12)
+        self.assertEqual(verdict.locale, "EN")
+        self.assertEqual(verdict.required_unique, 9)
+        self.assertEqual(verdict.required_articles, 5)
+        self.assertEqual(verdict.status, "BAD:LOW_PROFILE")
 
     def test_uncertain_sol_anchor_precheck_falls_back_to_combined_first_batch(self):
         checker = OpenAIDomainChecker.__new__(OpenAIDomainChecker)
@@ -2156,6 +2506,83 @@ class DomainAggregationTests(unittest.TestCase):
         self.assertEqual(verdict.status, "GOOD")
         self.assertEqual(verdict.api_calls, 2)
         self.assertEqual(calls, [AnchorScreenAssessment, FirstBatchAssessment])
+
+    def test_archive_locale_sample_is_sent_only_with_first_combined_batch(self):
+        checker = OpenAIDomainChecker.__new__(OpenAIDomainChecker)
+        checker.client = object()
+        checker.last_error = ""
+        checker.model_notice = ""
+        checker._model_access_checked = True
+        checker.screen_model = "test-luna"
+        checker.model = "test-terra"
+        checker.screen_max_output_tokens = 900
+        checker.batch_max_output_tokens = 2500
+        checker.anchor_precheck_max_output_tokens = 700
+        checker.batch_size = 20
+        checker.max_risk_anchors = 100
+        checker.enable_luna_screen = False
+        checker.enable_sol_anchor_precheck = False
+        checker.fetch_page_content = False
+        calls = []
+
+        def fake_parse(prompt, payload, text_format, max_output_tokens, model_name=None):
+            calls.append(text_format)
+            self.assertIs(text_format, FirstBatchAssessment)
+            self.assertIn("anchors", payload)
+            self.assertEqual(len(payload["webarchive_locale_samples"]), 1)
+            self.assertIn("English multiplayer game", payload["webarchive_locale_samples"][0]["excerpt"])
+            ids = [str(row[0]) for row in payload["rows"]]
+            return (
+                FirstBatchAssessment(
+                    locale="EN",
+                    locale_evidence="English international game; Lithuanian developer is not the market",
+                    locale_confidence="HIGH",
+                    locale_market_confirmed=False,
+                    country_origin="LT",
+                    language="EN",
+                    topic="multiplayer game",
+                    anchor_risk="CLEAN",
+                    anchor_reasons=[],
+                    pbn_risk="CLEAN",
+                    pbn_reasons=[],
+                    hard_stop_reasons=[],
+                    quality_record_ids=ids,
+                    article_record_ids=[],
+                    old_record_ids=[],
+                    modern_record_ids=ids,
+                    borderline_record_ids=[],
+                    fresh_record_ids=[],
+                    unknown_age_record_ids=[],
+                    spam_record_ids=[],
+                ),
+                300,
+                40,
+            )
+
+        checker._parse = fake_parse
+        verdict = checker.evaluate(
+            "projectzerodeaths.com",
+            "HU",
+            {"rows": make_rows(9, domain="projectzerodeaths.com")},
+            {"rows": [{"anchor": "Project Zero Deaths", "referring_domains": 5}]},
+            {"rows": [{"anchor": "projectzerodeaths.com", "referring_domains": 8}]},
+            archive_locale_samples=[
+                {
+                    "timestamp": "20190801000000",
+                    "original": "https://projectzerodeaths.com/",
+                    "title": "Project Zero Deaths",
+                    "excerpt": "English multiplayer game for Steam, iOS and Android. Developer UAB Detis.",
+                    "confidence": "HIGH",
+                    "life_period": "2019-2021",
+                    "supporting_snapshots": 5,
+                }
+            ],
+        )
+
+        self.assertEqual(calls, [FirstBatchAssessment])
+        self.assertEqual(verdict.locale, "EN")
+        self.assertEqual(verdict.country_origin, "LT")
+        self.assertEqual(verdict.locale_source, "AI+ARCHIVE")
 
 if __name__ == "__main__":
     unittest.main()

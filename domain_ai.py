@@ -113,6 +113,9 @@ class LinkAssessment(BaseModel):
 class DomainEvidenceAssessment(BaseModel):
     locale: str
     locale_evidence: str = ""
+    locale_confidence: str = "LOW"
+    locale_market_confirmed: bool = False
+    country_origin: str = ""
     language: str
     topic: str
     pbn_risk: RiskLevel
@@ -130,6 +133,9 @@ class AnchorScreenAssessment(BaseModel):
 
     locale: str
     locale_evidence: str = ""
+    locale_confidence: str = "LOW"
+    locale_market_confirmed: bool = False
+    country_origin: str = ""
     language: str
     topic: str
     anchor_risk: RiskLevel
@@ -176,6 +182,9 @@ class FirstBatchAssessment(BaseModel):
 
     locale: str
     locale_evidence: str = ""
+    locale_confidence: str = "LOW"
+    locale_market_confirmed: bool = False
+    country_origin: str = ""
     language: str
     topic: str
     anchor_risk: RiskLevel
@@ -200,6 +209,11 @@ class DomainVerdict:
     status: str
     reason: str
     locale: str = ""
+    locale_evidence: str = ""
+    locale_confidence: str = ""
+    locale_market_confirmed: bool = False
+    country_origin: str = ""
+    locale_archive_snapshot: str = ""
     language: str = ""
     topic: str = ""
     unique_quality: int = 0
@@ -527,6 +541,227 @@ def resolve_locale_with_source(title: str, domain: str, ai_locale: str) -> tuple
 
 def resolve_locale(title: str, domain: str, ai_locale: str) -> str:
     return resolve_locale_with_source(title, domain, ai_locale)[0]
+
+
+# Country buckets below the international 9/5 threshold must never be selected
+# for a generic TLD merely from the owner's country or a few donor signals.
+SOFT_THRESHOLD_LOCALES = {"LT", "LV", "EE", "BR", "PL", "SE", "CL", "IN", "AU"}
+
+# A model can correctly recognise the country of the owner/developer while
+# still being wrong about the site's target market.  This matters because a
+# few country buckets use a lower backlink threshold.  On generic TLDs an
+# owner-only explanation must therefore not count as direct market evidence.
+LOCALE_OWNER_ORIGIN_RE = re.compile(
+    r"\b(?:owner|developer|publisher|founder|headquarters|hq|registered|registration|"
+    r"incorporated|legal entity|company|business|organisation|organization|"
+    r"corporate origin|jurisdiction|uab|gmbh|llc|ltd|limited|inc|sarl|"
+    r"владел(?:ец|ьц)|разработчик|издатель|основатель|штаб[- ]?квартир|"
+    r"зарегистрир|регистрац|юридическ(?:ое|ая) лиц|страна компании)\b",
+    re.IGNORECASE,
+)
+LOCALE_DIRECT_MARKET_RE = re.compile(
+    r"\b(?:target (?:market|audience)|market|audience|customers?|users?|residents?|"
+    r"service area|serves?|local service|available in|ships? to|shipping|delivery|"
+    r"prices?|pricing|currency|events?|stores?|shops?|"
+    r"(?:lithuanian|latvian|estonian|polish|swedish|portuguese|hindi|spanish)[- ]language|"
+    r"content (?:is |in )?(?:lithuanian|latvian|estonian|polish|swedish|portuguese|hindi|spanish)|"
+    r"целев(?:ой|ая|ые) (?:рынок|аудитори)|рынок|аудитори|клиент|покупател|"
+    r"пользовател|жител|локальн(?:ая|ые|ый) услуг|обслужив|достав|цен|валют|"
+    r"мероприят|контент на|сайт на)\b",
+    re.IGNORECASE,
+)
+LOCALE_NON_LOCAL_MARKET_RE = re.compile(
+    r"\b(?:international|internationally|global|globally|worldwide|world-wide|"
+    r"no dominant country|without a dominant country|english[- ]only|only in english|"
+    r"international audience|global (?:audience|users?|market)|not (?:the )?market|"
+    r"международн|глобальн|по всему миру|без доминирующей страны|рынок не|"
+    r"не ориентирован(?:а|о|ы)? на)\b",
+    re.IGNORECASE,
+)
+LOCALE_GENERIC_MARKET_RE = re.compile(
+    r"\b(?:market|audience|customers?|users?|residents?|service|delivery|prices?|currency|"
+    r"site|website|portal|content|events?|stores?|shops?|"
+    r"рынок|аудитори\w*|клиент\w*|пользовател\w*|жител\w*|услуг\w*|достав\w*|"
+    r"цен\w*|валют\w*|сайт\w*|портал\w*|контент\w*|мероприят\w*)\b",
+    re.IGNORECASE,
+)
+LOCALE_OTHER_MARKET_COUNTRIES_RE = re.compile(
+    r"\b(?:germany|german|deutschland|austria|austrian|österreich|switzerland|swiss|schweiz|"
+    r"france|french|italy|italian|spain|spanish|netherlands|dutch|belgium|belgian|"
+    r"united kingdom|british|england|united states|american|canada|canadian|"
+    r"германи\w*|немец\w*|австри\w*|швейцари\w*|франци\w*|итали\w*|испани\w*)\b",
+    re.IGNORECASE,
+)
+LOCALE_COMMON_FOREIGN_MARKET_RE = re.compile(
+    r"\b(?:japan|japanese|tokyo|china|chinese|beijing|shanghai|korea|korean|seoul|"
+    r"hungary|hungarian|budapest|romania|romanian|bucharest|czechia|czech|prague|"
+    r"slovakia|slovak|bratislava|ukraine|ukrainian|kyiv|turkey|turkish|istanbul|"
+    r"mexico|mexican|argentina|argentinian|colombia|colombian|peru|peruvian|"
+    r"denmark|danish|norway|norwegian|finland|finnish|ireland|irish|portugal|portuguese)\b",
+    re.IGNORECASE,
+)
+SOFT_LOCALE_EVIDENCE_PATTERNS: Dict[str, re.Pattern[str]] = {
+    "LT": re.compile(r"\b(?:lithuania|lithuanian|lietuva|lietuvi\w*|vilnius|kaunas|klaip[eė]da|литв\w*|литов\w*|вильнюс)\b|\+370", re.IGNORECASE),
+    "LV": re.compile(r"\b(?:latvia|latvian|latvija|latvie\w*|riga|латви\w*|рига)\b|\+371", re.IGNORECASE),
+    "EE": re.compile(r"\b(?:estonia|estonian|eesti|tallinn|tartu|эстон\w*|таллин)\b|\+372", re.IGNORECASE),
+    "BR": re.compile(r"\b(?:brazil|brazilian|brasil|brasileir\w*|s[aã]o paulo|rio de janeiro|бразил\w*)\b|\+55|\bBRL\b", re.IGNORECASE),
+    "PL": re.compile(r"\b(?:poland|polish|polska|polsk\w*|warszawa|warsaw|krak[oó]w|польш\w*|польск\w*)\b|\+48|\bPLN\b", re.IGNORECASE),
+    "SE": re.compile(r"\b(?:sweden|swedish|sverige|svensk\w*|stockholm|швец\w*|шведск\w*)\b|\+46|\bSEK\b", re.IGNORECASE),
+    "CL": re.compile(r"\b(?:chile|chilean|chileno|santiago|чилийск\w*|чили)\b|\+56|\bCLP\b", re.IGNORECASE),
+    "IN": re.compile(r"\b(?:india|indian|bharat|hindi|delhi|mumbai|индийск\w*|инди\w*)\b|\+91|\bINR\b", re.IGNORECASE),
+    "AU": re.compile(r"\b(?:australia|australian|sydney|melbourne|австрали\w*)\b|\+61|\bAUD\b", re.IGNORECASE),
+}
+
+
+def _normalize_locale_confidence(value: Any) -> str:
+    confidence = str(value or "LOW").strip().upper()
+    return confidence if confidence in {"LOW", "MEDIUM", "HIGH"} else "LOW"
+
+
+def _soft_locale_has_direct_market_evidence(locale: str, evidence: str) -> bool:
+    """Require a positive link between a reduced-threshold country and its market."""
+
+    country_pattern = SOFT_LOCALE_EVIDENCE_PATTERNS.get(str(locale or "").upper())
+    if country_pattern is None or not country_pattern.search(evidence):
+        return False
+    # The model already provides a structured boolean.  Local code deliberately
+    # stays conservative: origin/legal-only evidence never opens a cheap
+    # threshold, while direct country + language/service/customer evidence may.
+    # Contradictory prose is handled by the explicit international/other-country
+    # guards below, rather than a loose proximity heuristic.
+    lowered = evidence.casefold()
+    locale_country_names = {
+        "LT": ("lithuania", "lithuanian", "lietuva", "litva", "литв", "литов", "vilnius", "вильнюс"),
+        "LV": ("latvia", "latvian", "latvija", "латви", "riga", "рига"),
+        "EE": ("estonia", "estonian", "eesti", "эстон", "tallinn", "таллин"),
+        "BR": ("brazil", "brazilian", "brasil", "бразил"),
+        "PL": ("poland", "polish", "polska", "польш", "польск"),
+        "SE": ("sweden", "swedish", "sverige", "швец", "швед"),
+        "CL": ("chile", "chilean", "чили"),
+        "IN": ("india", "indian", "bharat", "hindi", "инди"),
+        "AU": ("australia", "australian", "австрали"),
+    }
+    evidence_without_owner_scope = re.sub(
+        r"\b(?:international|global)\s+(?:company|business|organisation|organization)\b",
+        "",
+        evidence,
+        flags=re.IGNORECASE,
+    )
+    international_matches = list(LOCALE_NON_LOCAL_MARKET_RE.finditer(evidence_without_owner_scope))
+    international_match = international_matches[0] if international_matches else None
+    international_conflict = bool(international_match)
+    international_negated = bool(
+        re.search(
+            r"\b(?:not|isn['’]?t|is not|не)\b.{0,35}\b(?:international|global|worldwide|международн|глобальн)\w*",
+            evidence,
+            re.IGNORECASE,
+        )
+    )
+    non_local_negated = bool(
+        re.search(
+            r"\b(?:not|no|without|isn['’]?t|is not|не|нет|без)\b.{0,45}"
+            r"\b(?:international|global|worldwide|english[- ]only|only in english|международн|глобальн|английск)\w*",
+            evidence,
+            re.IGNORECASE,
+        )
+    )
+    if international_conflict and not (international_negated or non_local_negated):
+        return False
+    if re.search(r"\b(?:outside(?:\s+of)?|except|not|no|without|не|нет|без)\s+(?:the\s+)?(?:lithuania|lithuanian|latvia|latvian|estonia|estonian|brazil|brazilian|poland|polish|sweden|swedish|chile|chilean|india|indian|australia|australian|литв\w*|литов\w*)\b", evidence, re.IGNORECASE):
+        return False
+    if re.search(r"(?:lithuania|lithuanian|latvia|latvian|estonia|estonian|brazil|brazilian|poland|polish|sweden|swedish|chile|chilean|india|indian|australia|australian|литв\w*|литов\w*).{0,45}\b(?:no|without|не|нет|без)\b.{0,25}(?:local\s+)?(?:customers?|users?|audience|market|residents?|клиент\w*|пользовател\w*|аудитори\w*|рынок|жител\w*)", evidence, re.IGNORECASE):
+        return False
+
+    # If the explanation explicitly assigns customers/market to a different
+    # reduced-threshold country, reject the candidate instead of guessing.
+    for other_locale, other_pattern in SOFT_LOCALE_EVIDENCE_PATTERNS.items():
+        if other_locale == locale:
+            continue
+        for match in other_pattern.finditer(evidence):
+            window = lowered[max(0, match.start() - 80) : min(len(lowered), match.end() + 80)]
+            if re.search(r"\b(?:market|audience|customers?|users?|service|delivery|prices?|рынок|аудитори|клиент|пользовател|услуг|достав)\b", window, re.IGNORECASE):
+                return False
+    for match in LOCALE_OTHER_MARKET_COUNTRIES_RE.finditer(evidence):
+        window = lowered[max(0, match.start() - 80) : min(len(lowered), match.end() + 80)]
+        if LOCALE_GENERIC_MARKET_RE.search(window):
+            return False
+    for match in LOCALE_COMMON_FOREIGN_MARKET_RE.finditer(evidence):
+        window = lowered[max(0, match.start() - 80) : min(len(lowered), match.end() + 80)]
+        if LOCALE_GENERIC_MARKET_RE.search(window):
+            return False
+    # A direct “market/customers in X” assignment to an unknown different
+    # country is also contradictory. This catches countries outside the small
+    # reduced-threshold map without maintaining an exhaustive country list.
+    other_assignment = re.search(
+        r"\b(?:market|audience|customers?|users?|service|delivery|рынок|аудитори\w*|клиент\w*|пользовател\w*|услуг\w*)\b.{0,35}\b(?:in|for|to|в|для)\s+([A-ZА-ЯЁ][\wÀ-žА-Яа-яЁё-]{2,})",
+        evidence,
+    )
+    if other_assignment and not country_pattern.search(other_assignment.group(1)):
+        return False
+
+    market_phrases = LOCALE_GENERIC_MARKET_RE.pattern
+    country_phrases = "|".join(
+        re.escape(value) for value in locale_country_names.get(locale, ())
+    )
+    if not country_phrases:
+        return False
+    # Accept either order within a short sentence-like window.  This catches
+    # natural evidence such as “Vilnius municipal portal in Lithuanian” while
+    # still requiring the candidate country itself to be named.
+    positive = re.search(
+        rf"(?:{country_phrases}).{{0,100}}{market_phrases}|{market_phrases}.{{0,100}}(?:{country_phrases})",
+        lowered,
+        re.IGNORECASE,
+    )
+    return bool(positive)
+
+
+def _locale_market_evidence_confirmed(assessment: Any) -> bool:
+    confidence = _normalize_locale_confidence(
+        _value(assessment, "locale_confidence", "LOW")
+    )
+    evidence = str(_value(assessment, "locale_evidence", "") or "").strip()
+    confirmed = (
+        bool(_value(assessment, "locale_market_confirmed", False))
+        and confidence in {"MEDIUM", "HIGH"}
+        and bool(evidence)
+    )
+    if not confirmed:
+        return False
+    locale = _valid_locale_code(_value(assessment, "locale", ""))
+    if locale in SOFT_THRESHOLD_LOCALES:
+        return _soft_locale_has_direct_market_evidence(locale, evidence)
+    # Explicit owner/developer/legal-origin evidence is not enough by itself.
+    # Keep it only when the same explanation also contains a concrete signal
+    # about the audience, service area, language, prices or distribution.
+    if LOCALE_OWNER_ORIGIN_RE.search(evidence) and not LOCALE_DIRECT_MARKET_RE.search(evidence):
+        return False
+    return True
+
+
+def resolve_assessed_locale_with_source(
+    title: str,
+    domain: str,
+    assessment: Any,
+) -> tuple[str, str]:
+    """Resolve the threshold market and guard cheap country guesses on generic TLDs."""
+
+    manual = batch_locale_override(title)
+    if manual:
+        return manual, "OVERRIDE"
+    ai_locale = _valid_locale_code(_value(assessment, "locale", ""))
+    language = _valid_locale_code(_value(assessment, "language", ""))
+    market_confirmed = _locale_market_evidence_confirmed(assessment)
+    tld_value = tld_locale(domain)
+    if ai_locale:
+        if ai_locale in SOFT_THRESHOLD_LOCALES and not market_confirmed:
+            if tld_value:
+                return (ai_locale, "AI") if ai_locale == tld_value else (tld_value, "AI_GUARD")
+            return ("EN", "AI_GUARD") if language == "EN" else ("OTHER", "AI_GUARD")
+        return ai_locale, "AI"
+    if tld_value:
+        return tld_value, "TLD"
+    return "OTHER", "FALLBACK"
 
 
 def thresholds_for_locale(locale: str) -> tuple[int, int]:
@@ -2308,14 +2543,33 @@ def aggregate_assessment(
     freshness_filter_enabled: bool = True,
     freshness_cutoff_year: int = 2016,
     freshness_max_old_share_percent: int = 50,
+    archive_locale_samples: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> DomainVerdict:
     rows = list(backlinks)
     rows_by_id = {str(row.get("record_id")): row for row in rows if row.get("record_id")}
-    locale, locale_source = resolve_locale_with_source(title, domain, _value(assessment, "locale", ""))
-    if locale == "OTHER" and locale_source == "FALLBACK":
+    locale, locale_source = resolve_assessed_locale_with_source(title, domain, assessment)
+    if locale == "OTHER" and locale_source in {"FALLBACK", "AI_GUARD"}:
         inferred_locale, inferred_source = infer_locale_from_backlinks_with_source(rows)
         if inferred_locale:
-            locale, locale_source = inferred_locale, inferred_source
+            # Donor geography is useful evidence, but on a generic TLD it must
+            # not unlock a reduced threshold without direct market evidence.
+            if not (not tld_locale(domain) and inferred_locale in SOFT_THRESHOLD_LOCALES):
+                locale, locale_source = inferred_locale, inferred_source
+    archive_samples = list(archive_locale_samples or [])
+    if archive_samples and locale_source in {"AI", "AI_GUARD"}:
+        locale_source = f"{locale_source}+ARCHIVE"
+    locale_evidence = str(_value(assessment, "locale_evidence", "") or "").strip()
+    locale_confidence = _normalize_locale_confidence(
+        _value(assessment, "locale_confidence", "LOW")
+    )
+    locale_market_confirmed = _locale_market_evidence_confirmed(assessment)
+    country_origin = _valid_locale_code(_value(assessment, "country_origin", ""))
+    locale_archive_snapshot = ""
+    if archive_samples:
+        first_archive = archive_samples[0]
+        archive_stamp = str(first_archive.get("timestamp") or "")[:8]
+        archive_title = re.sub(r"\s+", " ", str(first_archive.get("title") or "")).strip()[:120]
+        locale_archive_snapshot = " · ".join(part for part in (archive_stamp, archive_title) if part)
     required_unique, required_articles = thresholds_for_locale(locale)
     cutoff_year = clean_freshness_cutoff_year(freshness_cutoff_year)
     max_old_share_percent = clean_freshness_old_share_percent(freshness_max_old_share_percent)
@@ -2483,6 +2737,11 @@ def aggregate_assessment(
         status=status,
         reason=reason,
         locale=locale,
+        locale_evidence=locale_evidence,
+        locale_confidence=locale_confidence,
+        locale_market_confirmed=locale_market_confirmed,
+        country_origin=country_origin,
+        locale_archive_snapshot=locale_archive_snapshot,
         locale_source=locale_source,
         language=str(_value(assessment, "language", "")),
         topic=str(_value(assessment, "topic", "")),
@@ -2677,6 +2936,9 @@ def combine_staged_assessments(
     return {
         "locale": anchor.locale,
         "locale_evidence": anchor.locale_evidence,
+        "locale_confidence": anchor.locale_confidence,
+        "locale_market_confirmed": anchor.locale_market_confirmed,
+        "country_origin": anchor.country_origin,
         "language": anchor.language,
         "topic": anchor.topic,
         "pbn_risk": pbn_risk.value,
@@ -2698,6 +2960,9 @@ def split_first_batch(
     anchor = AnchorScreenAssessment(
         locale=value.locale,
         locale_evidence=value.locale_evidence,
+        locale_confidence=value.locale_confidence,
+        locale_market_confirmed=value.locale_market_confirmed,
+        country_origin=value.country_origin,
         language=value.language,
         topic=value.topic,
         anchor_risk=value.anchor_risk,
@@ -2923,6 +3188,7 @@ class OpenAIDomainChecker:
         majestic_status: str = "GOOD",
         historic_pages_report: Optional[Dict[str, Any]] = None,
         browser_page_fetcher: Optional[Callable[[str, int], Dict[str, Any]]] = None,
+        archive_locale_samples: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> DomainVerdict:
         local_name_stop = local_domain_name_precheck(domain, title)
         if local_name_stop is not None:
@@ -2941,6 +3207,24 @@ class OpenAIDomainChecker:
             historic_anchors,
             historic_pages_report,
         )
+        prepared_archive_samples: List[Dict[str, Any]] = []
+        for sample in list(archive_locale_samples or [])[:2]:
+            if not isinstance(sample, dict):
+                continue
+            excerpt = re.sub(r"\s+", " ", str(sample.get("excerpt") or "")).strip()[:2200]
+            if not excerpt:
+                continue
+            prepared_archive_samples.append(
+                {
+                    "timestamp": str(sample.get("timestamp") or "")[:14],
+                    "original": str(sample.get("original") or "")[:500],
+                    "title": re.sub(r"\s+", " ", str(sample.get("title") or "")).strip()[:300],
+                    "excerpt": excerpt,
+                    "confidence": str(sample.get("confidence") or "LOW")[:10],
+                    "life_period": str(sample.get("life_period") or "")[:20],
+                    "supporting_snapshots": int(sample.get("supporting_snapshots") or 0),
+                }
+            )
 
         strict_mode = bool(getattr(self, "strict_mode", False))
         strict_unique_deficit = getattr(self, "strict_unique_deficit", 1)
@@ -3138,6 +3422,11 @@ class OpenAIDomainChecker:
                 )
                 precheck_anchor = AnchorScreenAssessment.model_validate(parsed_anchor)
                 precheck_anchor, anchor_warnings = sanitize_seo_only_anchor(precheck_anchor)
+                precheck_locale_confidence = _normalize_locale_confidence(
+                    precheck_anchor.locale_confidence
+                )
+                precheck_locale_evidence = str(precheck_anchor.locale_evidence or "").strip()
+                precheck_market_confirmed = _locale_market_evidence_confirmed(precheck_anchor)
                 total_input_tokens += input_tokens
                 total_output_tokens += output_tokens
                 api_calls += 1
@@ -3147,7 +3436,11 @@ class OpenAIDomainChecker:
                     precheck_anchor.anchor_risk == RiskLevel.SPAM
                     and precheck_anchor.hard_stop_reasons
                 ):
-                    locale, locale_source = resolve_locale_with_source(title, domain, precheck_anchor.locale)
+                    locale, locale_source = resolve_assessed_locale_with_source(
+                        title,
+                        domain,
+                        precheck_anchor,
+                    )
                     required_unique, required_articles = thresholds_for_locale(locale)
                     self.last_error = ""
                     return DomainVerdict(
@@ -3160,6 +3453,10 @@ class OpenAIDomainChecker:
                         ),
                         locale=locale,
                         locale_source=locale_source,
+                        locale_evidence=precheck_locale_evidence,
+                        locale_confidence=precheck_locale_confidence,
+                        locale_market_confirmed=precheck_market_confirmed,
+                        country_origin=_valid_locale_code(precheck_anchor.country_origin),
                         language=precheck_anchor.language,
                         topic=precheck_anchor.topic,
                         required_unique=required_unique,
@@ -3175,11 +3472,29 @@ class OpenAIDomainChecker:
                         anchors_sent=anchors_sent,
                         early_stop_stage="sol_anchor_precheck",
                     )
-                if precheck_anchor.anchor_risk == RiskLevel.CLEAN:
+                if (
+                    precheck_anchor.anchor_risk == RiskLevel.CLEAN
+                    and not prepared_archive_samples
+                    and precheck_market_confirmed
+                    and not (
+                        not tld_locale(domain)
+                        and _valid_locale_code(precheck_anchor.locale)
+                        in SOFT_THRESHOLD_LOCALES
+                    )
+                ):
                     anchor_assessment = precheck_anchor
                     extra_warnings.append(
                         "Anchor-only AI не нашёл стопов; anchors не дублируются в первом полном запросе"
                     )
+                elif precheck_anchor.anchor_risk == RiskLevel.CLEAN:
+                    if prepared_archive_samples:
+                        extra_warnings.append(
+                            "Anchor-only AI не нашёл стопов; первая полная пачка повторно определяет рынок с учётом WebArchive"
+                        )
+                    else:
+                        extra_warnings.append(
+                            "Anchor-only AI не нашёл стопов; первая полная пачка повторно определяет рынок по полному контексту"
+                        )
                 else:
                     extra_warnings.append(
                         "Anchor-only AI не подтвердил жёсткий стоп; профиль передан в полную проверку выбранной моделью"
@@ -3278,6 +3593,8 @@ class OpenAIDomainChecker:
                         f"Лимит проверки содержимого: не открыто потенциальных страниц {skipped_pages}"
                     )
                 if batch_number == 1:
+                    if prepared_archive_samples:
+                        payload["webarchive_locale_samples"] = prepared_archive_samples
                     page_columns, historic_pages, historic_pages_truncated = compact_historic_pages_payload(
                         {"rows": evidence.get("historic_pages", []), "truncated": evidence["collection_contract"].get("historic_pages_truncated")},
                         max_rows=getattr(self, "max_historic_pages_context", 15),
@@ -3311,7 +3628,11 @@ class OpenAIDomainChecker:
                         batch_assessment = LinkBatchAssessment.model_validate(parsed_batch)
                         batch_assessment, batch_warnings = sanitize_seo_only_batch(batch_assessment)
                         extra_warnings.extend(batch_warnings)
-                    locale = resolve_locale(title, domain, anchor_assessment.locale)
+                    locale, _locale_source = resolve_assessed_locale_with_source(
+                        title,
+                        domain,
+                        anchor_assessment,
+                    )
                     required_unique, required_articles = thresholds_for_locale(locale)
                     near_unique, near_articles = near_thresholds_for_locale(
                         locale,
@@ -3651,6 +3972,7 @@ class OpenAIDomainChecker:
                 freshness_filter_enabled=freshness_filter_enabled,
                 freshness_cutoff_year=freshness_cutoff_year,
                 freshness_max_old_share_percent=freshness_max_old_share_percent,
+                archive_locale_samples=prepared_archive_samples,
             )
             verdict.input_tokens = total_input_tokens
             verdict.output_tokens = total_output_tokens

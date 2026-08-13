@@ -56,6 +56,25 @@ class AppStateTests(unittest.TestCase):
         self.assertEqual(snapshot["results"][0]["status"], app_module.PENDING_AI_STATUS)
         self.assertEqual(snapshot["counts"]["pending_ai"], 1)
 
+    def test_result_snapshot_is_detached_from_live_background_row(self):
+        state = app_module.AppState()
+        row = app_module.ResultRow(
+            title="TEST",
+            domain="example.com",
+            status=app_module.PENDING_AI_STATUS,
+            ai_reason="queued",
+        )
+        state.results.append(row)
+
+        snapshot = state.get_snapshot()
+        row.status = "GOOD"
+        row.ai_reason = "finished"
+
+        self.assertEqual(snapshot["results"][0]["status"], app_module.PENDING_AI_STATUS)
+        self.assertEqual(snapshot["results"][0]["ai_reason"], "queued")
+        snapshot["results"][0]["status"] = "BAD"
+        self.assertEqual(row.status, "GOOD")
+
     def test_promoted_completed_result_moves_to_top_of_recent_results(self):
         state = app_module.AppState()
         old_row = app_module.ResultRow(title="OLD", domain="old.example", status="PENDING:AI")
@@ -84,6 +103,109 @@ class AppStateTests(unittest.TestCase):
         self.assertEqual(row.status, app_module.PENDING_WEBARCHIVE_STATUS)
         self.assertEqual(row.webarchive_status, "QUEUED")
         put_task.assert_called_once()
+
+    def test_clean_webarchive_preflight_releases_same_task_to_ai_once(self):
+        test_state = app_module.AppState()
+        row = app_module.ResultRow(
+            title="HU",
+            domain="projectzerodeaths.com",
+            status=app_module.PENDING_WEBARCHIVE_STATUS,
+            ai_status="WAITING ARCHIVE",
+            webarchive_status="QUEUED",
+        )
+        test_state.results.append(row)
+        ai_task = app_module.AITask(
+            row=row,
+            majestic_status="GOOD",
+            backlinks_report={"rows": []},
+            historic_pages={"rows": []},
+            fresh_anchors={"rows": []},
+            historic_anchors={"rows": []},
+            settings={},
+        )
+
+        class ArchiveResult:
+            checked = True
+            spam = False
+            snapshots_found = 3
+            snapshots_checked = 3
+            errors = []
+            reason = "clean"
+            locale_samples = [{"timestamp": "20190801000000", "excerpt": "English global game"}]
+            script_observations = []
+
+        task = app_module.WebArchiveTask(
+            row=row,
+            original_status=app_module.PENDING_AI_STATUS,
+            original_reason="",
+            ai_task=ai_task,
+        )
+        with (
+            patch.object(app_module, "state", test_state),
+            patch.object(app_module, "check_webarchive_spam", return_value=ArchiveResult()) as archive_check,
+            patch.object(app_module.ai_tasks, "put") as put_ai,
+            patch.object(app_module.duplicate_store, "add") as add_duplicate,
+            patch.object(app_module.sheets, "append_good") as append_good,
+            patch.object(app_module, "write_results_csv"),
+        ):
+            app_module.finalize_webarchive_task(task)
+
+        self.assertEqual(row.status, app_module.PENDING_AI_STATUS)
+        self.assertEqual(row.ai_status, "QUEUED")
+        self.assertEqual(row.webarchive_status, "OK 3")
+        self.assertIs(ai_task.webarchive_result.__class__, ArchiveResult)
+        put_ai.assert_called_once_with(ai_task)
+        archive_check.assert_called_once()
+        self.assertFalse(archive_check.call_args.kwargs["scan_scripts"])
+        add_duplicate.assert_not_called()
+        append_good.assert_not_called()
+
+    def test_webarchive_spam_preflight_stops_before_ai(self):
+        test_state = app_module.AppState()
+        row = app_module.ResultRow(
+            title="TEST",
+            domain="spam.example",
+            status=app_module.PENDING_WEBARCHIVE_STATUS,
+            ai_status="WAITING ARCHIVE",
+            webarchive_status="QUEUED",
+        )
+        test_state.results.append(row)
+        ai_task = app_module.AITask(
+            row=row,
+            majestic_status="GOOD",
+            backlinks_report={"rows": []},
+            historic_pages={"rows": []},
+            fresh_anchors={"rows": []},
+            historic_anchors={"rows": []},
+            settings={},
+        )
+
+        class ArchiveResult:
+            checked = True
+            spam = True
+            snapshots_found = 2
+            snapshots_checked = 2
+            errors = []
+            reason = "WebArchive spam: casino"
+            locale_samples = []
+            script_observations = []
+
+        task = app_module.WebArchiveTask(row, app_module.PENDING_AI_STATUS, "", ai_task=ai_task)
+        with (
+            patch.object(app_module, "state", test_state),
+            patch.object(app_module, "check_webarchive_spam", return_value=ArchiveResult()),
+            patch.object(app_module.ai_tasks, "put") as put_ai,
+            patch.object(app_module.duplicate_store, "add") as add_duplicate,
+            patch.object(app_module.sheets, "append_good") as append_good,
+            patch.object(app_module, "write_results_csv"),
+        ):
+            app_module.finalize_webarchive_task(task)
+
+        self.assertEqual(row.status, "BAD:WEBARCHIVE_SPAM")
+        self.assertEqual(row.ai_status, "SKIP:ARCHIVE STOP")
+        put_ai.assert_not_called()
+        add_duplicate.assert_called_once_with("spam.example")
+        append_good.assert_not_called()
 
     def test_finalize_ai_task_promotes_completed_row(self):
         test_state = app_module.AppState()
@@ -156,6 +278,116 @@ class AppStateTests(unittest.TestCase):
         add_duplicate.assert_called_once_with("example.de")
         append_good.assert_called_once_with(row)
         write_csv.assert_called_once()
+
+    def test_deferred_webarchive_postprocess_error_preserves_successful_ai_verdict(self):
+        test_state = app_module.AppState()
+        row = app_module.ResultRow(
+            title="DE",
+            domain="example.de",
+            status=app_module.PENDING_AI_STATUS,
+            ai_status="QUEUED",
+            webarchive_status="OK 2",
+        )
+        test_state.results.append(row)
+
+        class FakeChecker:
+            ready = True
+            last_error = ""
+            model = "gpt-5.6-terra"
+            _model_access_checked = True
+            model_notice = ""
+            strict_mode = False
+            strict_unique_deficit = 1
+            strict_article_deficit = 1
+            freshness_filter_enabled = True
+            freshness_cutoff_year = 2016
+            freshness_max_old_share_percent = 50
+
+            def evaluate(self, **kwargs):
+                return app_module.DomainVerdict(
+                    verdict="PASS",
+                    status="GOOD",
+                    reason="AI quality check passed.",
+                    locale="DE",
+                    unique_quality=9,
+                    article_links=5,
+                    homepage_links=5,
+                    anchor_risk="CLEAN",
+                    model="gpt-5.6-terra",
+                    api_calls=1,
+                )
+
+        class ArchiveResult:
+            locale_samples = []
+
+        task = app_module.AITask(
+            row=row,
+            majestic_status="GOOD",
+            backlinks_report={"rows": []},
+            historic_pages={"rows": []},
+            fresh_anchors={"rows": []},
+            historic_anchors={"rows": []},
+            settings={
+                "quality_model": "gpt-5.6-terra",
+                "strict_mode": False,
+                "strict_unique_deficit": 1,
+                "strict_article_deficit": 1,
+                "freshness_filter_enabled": True,
+                "freshness_cutoff_year": 2016,
+                "freshness_max_old_share_percent": 50,
+            },
+            webarchive_result=ArchiveResult(),
+        )
+
+        with (
+            patch.object(app_module, "state", test_state),
+            patch.object(
+                app_module,
+                "webarchive_script_spam_result",
+                side_effect=ValueError("malformed script observation"),
+            ),
+            patch.object(app_module.duplicate_store, "add") as add_duplicate,
+            patch.object(app_module.sheets, "append_good") as append_good,
+            patch.object(app_module, "write_results_csv") as write_csv,
+        ):
+            app_module.finalize_ai_task(task, FakeChecker())
+
+        self.assertEqual(row.status, "GOOD")
+        self.assertEqual(row.ai_verdict, "PASS")
+        self.assertEqual(row.ai_status, "OK 1")
+        self.assertEqual(row.webarchive_status, "WARN:SCRIPT_CHECK")
+        self.assertEqual(row.error, "")
+        self.assertIn("AI quality check passed.", row.ai_reason)
+        self.assertIn("AI-вердикт сохранён", row.ai_reason)
+        add_duplicate.assert_called_once_with("example.de")
+        append_good.assert_called_once_with(row)
+        write_csv.assert_called_once()
+
+    def test_idle_status_waits_for_background_checks_before_done(self):
+        test_state = app_module.AppState()
+        row = app_module.ResultRow(
+            title="DE",
+            domain="example.de",
+            status=app_module.PENDING_AI_STATUS,
+            ai_status="CHECKING",
+        )
+        test_state.results.append(row)
+
+        with test_state.lock:
+            test_state.refresh_idle_status_locked("DONE")
+        self.assertEqual(test_state.last_status, "BACKGROUND_CHECKS")
+
+        row.status = app_module.PENDING_WEBARCHIVE_STATUS
+        row.ai_status = "OK 1"
+        row.webarchive_status = "CHECKING"
+        with test_state.lock:
+            test_state.refresh_idle_status_locked("DONE")
+        self.assertEqual(test_state.last_status, "BACKGROUND_CHECKS")
+
+        row.status = "GOOD"
+        with test_state.lock:
+            test_state.refresh_idle_status_locked("DONE")
+        self.assertEqual(test_state.last_status, "DONE")
 
     def test_finalize_ai_good_waits_for_webarchive_before_outputs(self):
         test_state = app_module.AppState()
@@ -898,6 +1130,33 @@ class AppStateTests(unittest.TestCase):
             result = app_module.apply_webarchive_spam_gate(verdict, "example.de")
         self.assertEqual(result.status, "GOOD")
         self.assertEqual(result.webarchive_status, "SKIP:CDX_TIMEOUT")
+
+    def test_webarchive_partial_snapshot_timeout_is_reported_as_fetch_timeout(self):
+        class ArchiveResult:
+            checked = False
+            spam = False
+            snapshots_found = 24
+            snapshots_checked = 1
+            errors = ["2023-01: TimeoutError", "incomplete snapshot coverage: 1/24"]
+
+        self.assertEqual(
+            app_module.webarchive_skip_status(ArchiveResult()),
+            "SKIP:FETCH_TIMEOUT",
+        )
+
+    def test_webarchive_placeholder_only_result_is_non_retry_no_html(self):
+        class ArchiveResult:
+            checked = False
+            spam = False
+            snapshots_found = 12
+            snapshots_checked = 0
+            errors = []
+            no_life_found = True
+
+        self.assertEqual(
+            app_module.webarchive_skip_status(ArchiveResult()),
+            "SKIP:NO_HTML",
+        )
 
     def test_webarchive_skip_status_explains_no_html_snapshots(self):
         class ArchiveResult:
