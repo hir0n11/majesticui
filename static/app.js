@@ -254,15 +254,6 @@ function renderResults(rows) {
     const metric = compactMetric(row);
     const aiStatus = row.ai_status || "-";
     const locale = [row.locale, row.locale_source].filter(Boolean).join(" · ");
-    const localeDetails = [
-      row.locale_evidence,
-      row.locale_confidence ? `Уверенность: ${row.locale_confidence}` : "",
-      (row.locale_evidence || row.locale_confidence || row.country_origin)
-        ? (row.locale_market_confirmed ? "Рынок подтверждён прямыми сигналами" : "Рынок не подтверждён прямыми сигналами")
-        : "",
-      row.country_origin ? `Страна происхождения: ${row.country_origin}` : "",
-      row.locale_archive_snapshot ? `WebArchive: ${row.locale_archive_snapshot}` : "",
-    ].filter(Boolean).join(" | ");
     const webarchiveStatus = row.webarchive_status || "—";
     const pinned = isPendingRow(row);
     const outcomeLabel = displayOutcomeStatus(row.status || "");
@@ -274,7 +265,7 @@ function renderResults(rows) {
       <td>${escapeHtml(row.title || "")}</td>
       <td><strong>${escapeHtml(row.domain || "")}</strong></td>
       <td class="${statusClass(row.status)}" title="${escapeHtml(row.status || "")}">${renderStatusValue(row.status || "", outcomeLabel)}</td>
-      <td title="${escapeHtml(localeDetails)}">${escapeHtml(locale)}</td>
+      <td>${escapeHtml(locale)}</td>
       <td title="${escapeHtml(aiStatus)}">${renderStatusValue(aiStatus, aiLabel)}</td>
       <td class="metric-cell" title="${escapeHtml(metric)}">${renderCompactMetric(row)}</td>
       <td title="${escapeHtml(webarchiveStatus)}">${renderStatusValue(webarchiveStatus, webarchiveLabel)}</td>

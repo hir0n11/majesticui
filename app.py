@@ -44,7 +44,7 @@ from majestic_reports import (
     collect_backlinks,
     collect_pages,
 )
-from webarchive_spam import check_webarchive_spam, webarchive_script_spam_result
+from webarchive_spam import check_webarchive_spam
 
 try:
     import gspread
@@ -229,11 +229,6 @@ class ResultRow:
     ai_reason: str = ""
     locale: str = ""
     locale_source: str = ""
-    locale_evidence: str = ""
-    locale_confidence: str = ""
-    locale_market_confirmed: bool = False
-    country_origin: str = ""
-    locale_archive_snapshot: str = ""
     unique_quality: int = 0
     article_links: float = 0
     homepage_links: int = 0
@@ -262,7 +257,6 @@ class AITask:
     fresh_anchors: Dict[str, Any]
     historic_anchors: Dict[str, Any]
     settings: Dict[str, Any]
-    webarchive_result: Any = None
 
 
 @dataclass
@@ -271,7 +265,6 @@ class WebArchiveTask:
     original_status: str
     original_reason: str
     attempts: int = 0
-    ai_task: Optional[AITask] = None
 
 
 def format_link_year_range(row: ResultRow) -> str:
@@ -452,22 +445,12 @@ class GoogleSheetsSink:
             if target_worksheet is None:
                 return False
             try:
-                locale_label = f"{row.locale} · {row.locale_source}".strip(" ·")
-                locale_metadata = ""
-                if row.locale_evidence or row.locale_confidence or row.country_origin:
-                    locale_metadata = (
-                        f"{row.locale_confidence or 'UNKNOWN'}"
-                        f" · market={'yes' if row.locale_market_confirmed else 'no'}"
-                        f"{f' · origin={row.country_origin}' if row.country_origin else ''}"
-                        f"{f' · {row.locale_evidence}' if row.locale_evidence else ''}"
-                    )
-                locale_cell = f"{locale_label}\n{locale_metadata}" if locale_label and locale_metadata else locale_label or locale_metadata
                 target_worksheet.append_row(
                     [
                         row.title,
                         row.domain,
                         row.status,
-                        locale_cell,
+                        f"{row.locale} · {row.locale_source}".strip(" ·"),
                         format_compact_metric(row),
                         row.ai_reason,
                     ],
@@ -845,22 +828,6 @@ class AppState:
                 return
             self.results.append(row)
 
-    def refresh_idle_status_locked(self, completed_status: str = "DONE") -> None:
-        """Keep the global status honest while background checks are still pending.
-
-        Callers already hold ``self.lock``.  Active Majestic work (including a
-        stopped queue that can be resumed) owns ``last_status`` and is left
-        untouched here.
-        """
-
-        if self.running or any(item.state in {"queued", "processing"} for item in self.queue):
-            return
-        pending_background = any(
-            row.status in {PENDING_AI_STATUS, PENDING_WEBARCHIVE_STATUS}
-            for row in self.results
-        )
-        self.last_status = "BACKGROUND_CHECKS" if pending_background else completed_status
-
     def get_batch_summaries(self) -> List[Dict[str, Any]]:
         with self.lock:
             grouped: Dict[int, Dict[str, Any]] = {}
@@ -928,11 +895,7 @@ class AppState:
                 "current_domain": self.current_domain,
                 "current_title": self.current_title,
                 "counts": counts,
-                # Return immutable snapshots. Background AI/WebArchive workers
-                # may update the live rows as soon as this lock is released;
-                # leaking ``row.__dict__`` could otherwise produce a hybrid
-                # JSON response (new status with old reason/locale fields).
-                "results": [dict(row.__dict__) for row in results_for_ui],
+                "results": [row.__dict__ for row in results_for_ui],
                 "logs": self.logs[-160:],
                 "queue_batches": self.get_batch_summaries(),
                 "ai_queue_size": ai_tasks.qsize(),
@@ -1710,11 +1673,6 @@ def ai_result_fields(verdict: DomainVerdict, majestic_status: str = "GOOD") -> D
         "ai_reason": verdict.reason,
         "locale": verdict.locale,
         "locale_source": verdict.locale_source,
-        "locale_evidence": verdict.locale_evidence,
-        "locale_confidence": verdict.locale_confidence,
-        "locale_market_confirmed": verdict.locale_market_confirmed,
-        "country_origin": verdict.country_origin,
-        "locale_archive_snapshot": verdict.locale_archive_snapshot,
         "unique_quality": verdict.unique_quality,
         "article_links": verdict.article_links,
         "homepage_links": verdict.homepage_links,
@@ -1737,15 +1695,13 @@ def ai_result_fields(verdict: DomainVerdict, majestic_status: str = "GOOD") -> D
 def webarchive_skip_status(archive_result: Any) -> str:
     """Compact UI status for an archive check that could not inspect HTML."""
 
-    if bool(getattr(archive_result, "no_life_found", False)):
-        return "SKIP:NO_HTML"
     errors = [str(error or "") for error in getattr(archive_result, "errors", [])]
     error_text = " ".join(errors).lower()
     snapshots_found = int(getattr(archive_result, "snapshots_found", 0) or 0)
     snapshots_checked = int(getattr(archive_result, "snapshots_checked", 0) or 0)
     if "timeout" in error_text:
-        return "SKIP:FETCH_TIMEOUT" if snapshots_found else "SKIP:CDX_TIMEOUT"
-    if snapshots_found:
+        return "SKIP:FETCH_TIMEOUT" if snapshots_found and not snapshots_checked else "SKIP:CDX_TIMEOUT"
+    if snapshots_found and not snapshots_checked:
         return "SKIP:FETCH_ERROR"
     if errors:
         return "SKIP:CDX_ERROR"
@@ -1801,12 +1757,10 @@ def is_unrecoverable_webdriver_exception(exc: WebDriverException) -> bool:
 
 
 def write_results_csv() -> Path:
+    with state.lock:
+        rows = list(state.results)
     temp_path = RESULTS_CSV_FILE.with_suffix(RESULTS_CSV_FILE.suffix + ".tmp")
     with RESULTS_FILE_LOCK:
-        # Take the data snapshot only after this writer owns the file lock. It
-        # prevents an older concurrent snapshot from overwriting a newer CSV.
-        with state.lock:
-            rows = [ResultRow(**dict(row.__dict__)) for row in state.results]
         with temp_path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(
@@ -1819,11 +1773,6 @@ def write_results_csv() -> Path:
                     "AIReason",
                     "Locale",
                     "LocaleSource",
-                    "LocaleEvidence",
-                    "LocaleConfidence",
-                    "LocaleMarketConfirmed",
-                    "CountryOrigin",
-                    "LocaleArchiveSnapshot",
                     "UniqueQuality",
                     "ArticleLinks",
                     "HomepageLinks",
@@ -1850,11 +1799,6 @@ def write_results_csv() -> Path:
                         row.ai_reason,
                         row.locale,
                         row.locale_source,
-                        row.locale_evidence,
-                        row.locale_confidence,
-                        row.locale_market_confirmed,
-                        row.country_origin,
-                        row.locale_archive_snapshot,
                         row.unique_quality,
                         row.article_links,
                         row.homepage_links,
@@ -1940,17 +1884,6 @@ def update_row_from_result_fields(
     row.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def enqueue_ai_task(task: AITask) -> None:
-    row = task.row
-    with state.lock:
-        row.status = PENDING_AI_STATUS
-        row.ai_status = "QUEUED"
-        row.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        state.last_status = "AI_QUEUED"
-    ai_tasks.put(task)
-    logger.info(f"[{row.domain}] AI queued; continuing with next domain")
-
-
 def queue_ai_check(
     row: ResultRow,
     majestic_status: str,
@@ -1959,9 +1892,13 @@ def queue_ai_check(
     fresh_anchors: Dict[str, Any],
     historic_anchors: Dict[str, Any],
     settings: Dict[str, Any],
-    webarchive_result: Any = None,
 ) -> None:
-    enqueue_ai_task(
+    with state.lock:
+        row.status = PENDING_AI_STATUS
+        row.ai_status = "QUEUED"
+        row.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        state.last_status = "AI_QUEUED"
+    ai_tasks.put(
         AITask(
             row=row,
             majestic_status=majestic_status,
@@ -1970,34 +1907,22 @@ def queue_ai_check(
             fresh_anchors=fresh_anchors,
             historic_anchors=historic_anchors,
             settings=dict(settings),
-            webarchive_result=webarchive_result,
         )
     )
+    logger.info(f"[{row.domain}] AI queued; continuing with next domain")
 
 
-def queue_webarchive_check(row: ResultRow, ai_task: Optional[AITask] = None) -> bool:
-    if not WEBARCHIVE_SPAM_ENABLED:
+def queue_webarchive_check(row: ResultRow) -> bool:
+    if not WEBARCHIVE_SPAM_ENABLED or row.status not in FINAL_GOOD_STATUSES:
         return False
+    original_status = row.status
+    original_reason = row.ai_reason
     with state.lock:
-        eligible = row.status in FINAL_GOOD_STATUSES if ai_task is None else row.status == PENDING_AI_STATUS
-        if not eligible:
-            return False
-        original_status = row.status
-        original_reason = row.ai_reason
         row.status = PENDING_WEBARCHIVE_STATUS
         row.webarchive_status = "QUEUED"
-        if ai_task is not None:
-            row.ai_status = "WAITING ARCHIVE"
         row.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         state.last_status = "WEBARCHIVE_QUEUED"
-    webarchive_tasks.put(
-        WebArchiveTask(
-            row=row,
-            original_status=original_status,
-            original_reason=original_reason,
-            ai_task=ai_task,
-        )
-    )
+    webarchive_tasks.put(WebArchiveTask(row=row, original_status=original_status, original_reason=original_reason))
     logger.info(f"[{row.domain}] WebArchive queued; continuing with next domain")
     return True
 
@@ -2059,78 +1984,13 @@ def requeue_webarchive_task(task: WebArchiveTask, compact_status: str, reason: s
     timer.start()
 
 
-def finalize_pre_ai_webarchive_task(
-    task: WebArchiveTask,
-    archive_result: Any,
-    compact_status: str,
-    archive_reason: str,
-) -> None:
-    """Finish the archive preflight or release the prepared task to the AI queue."""
-
-    row = task.row
-    domain = row.domain
-    ai_task = task.ai_task
-    if ai_task is None:
-        return
-
-    proceed_to_ai = False
-    should_add_duplicate = False
-    with state.lock:
-        if row.status != PENDING_WEBARCHIVE_STATUS:
-            return
-        row.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if archive_result is None:
-            row.status = webarchive_error_status(compact_status)
-            row.webarchive_status = compact_status
-            row.ai_status = "SKIP:ARCHIVE ERROR"
-            row.error = archive_reason
-            row.ai_reason = f"WebArchive preflight завершился ошибкой до AI: {archive_reason}"
-        elif not archive_result.checked and compact_status != "SKIP:NO_HTML":
-            row.status = webarchive_error_status(compact_status)
-            row.webarchive_status = compact_status
-            row.ai_status = "SKIP:ARCHIVE ERROR"
-            row.error = archive_reason
-            row.ai_reason = f"WebArchive preflight не дал надежный результат до AI: {archive_reason}"
-        elif archive_result.spam:
-            row.status = "BAD:WEBARCHIVE_SPAM"
-            row.webarchive_status = f"SPAM {archive_result.snapshots_checked}"
-            row.ai_status = "SKIP:ARCHIVE STOP"
-            row.ai_verdict = "REJECT"
-            row.ai_reason = archive_result.reason
-            row.ai_early_stop_stage = "webarchive_spam_pre_ai"
-            row.error = ""
-            should_add_duplicate = True
-        else:
-            row.webarchive_status = (
-                f"OK {archive_result.snapshots_checked}"
-                if archive_result.checked
-                else compact_status
-            )
-            row.error = ""
-            ai_task.webarchive_result = archive_result
-            proceed_to_ai = True
-        state.refresh_idle_status_locked("WEBARCHIVE_DONE")
-
-    if proceed_to_ai:
-        logger.info(
-            f"[{domain}] WebArchive preflight complete; locale samples="
-            f"{len(getattr(archive_result, 'locale_samples', []) or [])}; sending to AI"
-        )
-        enqueue_ai_task(ai_task)
-    else:
-        state.promote_result(row)
-        if should_add_duplicate:
-            duplicate_store.add(domain)
-    write_results_csv()
-
-
 def finalize_webarchive_task(task: WebArchiveTask) -> None:
     row = task.row
     domain = row.domain
     with state.lock:
         if row.status != PENDING_WEBARCHIVE_STATUS:
             return
-        row.webarchive_status = f"CHECKING RETRY {task.attempts}" if task.attempts else "CHECKING"
+        row.webarchive_status = "CHECKING"
         row.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         state.last_status = "WEBARCHIVE_CHECKING"
     logger.info(f"[{domain}] WebArchive background check started")
@@ -2143,7 +2003,6 @@ def finalize_webarchive_task(task: WebArchiveTask) -> None:
             timeout=WEBARCHIVE_SPAM_TIMEOUT,
             max_chars=WEBARCHIVE_SPAM_MAX_CHARS,
             retries=WEBARCHIVE_SPAM_RETRIES,
-            scan_scripts=task.ai_task is None,
         )
     except Exception as exc:
         archive_result = None
@@ -2156,10 +2015,6 @@ def finalize_webarchive_task(task: WebArchiveTask) -> None:
 
     if webarchive_should_retry(compact_status, archive_reason):
         requeue_webarchive_task(task, compact_status, archive_reason)
-        return
-
-    if task.ai_task is not None:
-        finalize_pre_ai_webarchive_task(task, archive_result, compact_status, archive_reason)
         return
 
     should_append_sheets = False
@@ -2204,7 +2059,7 @@ def finalize_webarchive_task(task: WebArchiveTask) -> None:
             row.error = ""
             should_add_duplicate = True
             logger.info(f"[{domain}] WebArchive spam gate: {archive_result.reason}")
-        state.refresh_idle_status_locked("WEBARCHIVE_DONE")
+        state.last_status = "WEBARCHIVE_DONE" if not state.running else state.last_status
 
     state.promote_result(row)
     if should_add_duplicate:
@@ -2226,11 +2081,6 @@ def finalize_ai_task(task: AITask, checker: OpenAIDomainChecker) -> None:
     logger.info(f"[{domain}] AI background check started")
 
     try:
-        archive_locale_samples = [
-            sample.as_payload() if hasattr(sample, "as_payload") else dict(sample)
-            for sample in (getattr(task.webarchive_result, "locale_samples", []) or [])
-            if hasattr(sample, "as_payload") or isinstance(sample, dict)
-        ]
         apply_ai_settings_to_checker(checker, task.settings)
         if not checker.ready:
             raise RuntimeError(checker.last_error or "OpenAI client is not ready")
@@ -2243,36 +2093,7 @@ def finalize_ai_task(task: AITask, checker: OpenAIDomainChecker) -> None:
             majestic_status=task.majestic_status,
             historic_pages_report=task.historic_pages,
             browser_page_fetcher=article_browser_session.fetch,
-            archive_locale_samples=archive_locale_samples,
         )
-        if task.webarchive_result is not None:
-            verdict.webarchive_status = row.webarchive_status
-            try:
-                deferred_script_result = webarchive_script_spam_result(task.webarchive_result, verdict.locale)
-            except Exception as archive_exc:
-                archive_warning = (
-                    "Локальная постпроверка WebArchive не завершилась; "
-                    "AI-вердикт сохранён"
-                )
-                verdict.webarchive_status = "WARN:SCRIPT_CHECK"
-                verdict.warnings = [*list(verdict.warnings or []), archive_warning]
-                verdict.reason = f"{verdict.reason} Предупреждение: {archive_warning}."
-                logger.warning(
-                    f"[{domain}] WebArchive deferred script check failed after successful AI: "
-                    f"{type(archive_exc).__name__}: {str(archive_exc)[:300]}"
-                )
-            else:
-                if deferred_script_result is not None:
-                    original_reason = verdict.reason
-                    verdict.verdict = "REJECT"
-                    verdict.status = "BAD:WEBARCHIVE_SPAM"
-                    verdict.webarchive_status = f"SPAM {deferred_script_result.snapshots_checked}"
-                    verdict.reason = f"{deferred_script_result.reason}. Предыдущий AI-итог: {original_reason}"
-                    verdict.hard_stop_reasons = [
-                        *list(verdict.hard_stop_reasons or []),
-                        deferred_script_result.reason,
-                    ]
-                    verdict.early_stop_stage = "webarchive_script_after_locale"
     except Exception as exc:
         err_text = f"{type(exc).__name__}: {str(exc)[:500]}"
         with state.lock:
@@ -2286,7 +2107,7 @@ def finalize_ai_task(task: AITask, checker: OpenAIDomainChecker) -> None:
                     "ai_reason": err_text,
                 },
             )
-            state.refresh_idle_status_locked("AI_ERROR")
+            state.last_status = "AI_ERROR" if not state.running else state.last_status
         logger.error(f"[{domain}] OpenAI background error: {err_text}")
         state.promote_result(row)
         write_results_csv()
@@ -2297,7 +2118,7 @@ def finalize_ai_task(task: AITask, checker: OpenAIDomainChecker) -> None:
         if row.status != PENDING_AI_STATUS:
             return
         update_row_from_result_fields(row, verdict.status, "", result_fields)
-        state.refresh_idle_status_locked("AI_DONE")
+        state.last_status = "AI_DONE" if not state.running else state.last_status
 
     logger.info(
         f"[{domain}] AI => {verdict.verdict} | "
@@ -2306,7 +2127,7 @@ def finalize_ai_task(task: AITask, checker: OpenAIDomainChecker) -> None:
         f"stop={verdict.early_stop_stage} | majestic={task.majestic_status}"
     )
 
-    webarchive_queued = False if task.webarchive_result is not None else queue_webarchive_check(row)
+    webarchive_queued = queue_webarchive_check(row)
     if not webarchive_queued:
         state.promote_result(row)
         if not row.status.startswith("ERROR"):
@@ -2404,7 +2225,7 @@ def domain_worker() -> None:
                 state.running = False
                 state.current_domain = ""
                 state.current_title = ""
-                state.refresh_idle_status_locked("DONE")
+                state.last_status = "DONE"
             logger.info("Очередь завершена.")
             write_results_csv()
             continue
@@ -2672,8 +2493,8 @@ def domain_worker() -> None:
         row = state.complete_item(item.item_id, status, err_text, result_fields=result_fields)
         if row is not None:
             if pending_ai_task is not None and row.status == PENDING_AI_STATUS:
-                prepared_ai_task = AITask(
-                    row=row,
+                queue_ai_check(
+                    row,
                     majestic_status=str(pending_ai_task["majestic_status"]),
                     backlinks_report=pending_ai_task["backlinks_report"],
                     historic_pages=pending_ai_task["historic_pages"],
@@ -2681,16 +2502,6 @@ def domain_worker() -> None:
                     historic_anchors=pending_ai_task["historic_anchors"],
                     settings=pending_ai_task["settings"],
                 )
-                if not queue_webarchive_check(row, ai_task=prepared_ai_task):
-                    queue_ai_check(
-                        row=row,
-                        majestic_status=prepared_ai_task.majestic_status,
-                        backlinks_report=prepared_ai_task.backlinks_report,
-                        historic_pages=prepared_ai_task.historic_pages,
-                        fresh_anchors=prepared_ai_task.fresh_anchors,
-                        historic_anchors=prepared_ai_task.historic_anchors,
-                        settings=prepared_ai_task.settings,
-                    )
             else:
                 webarchive_queued = queue_webarchive_check(row)
                 if webarchive_queued:
@@ -2865,7 +2676,7 @@ def recover_browser_then_start() -> None:
         if should_run:
             state.last_status = "RUNNING"
         elif recovered and not has_queue:
-            state.refresh_idle_status_locked("DONE")
+            state.last_status = "DONE"
         elif not recovered:
             state.last_status = "BROWSER_ERROR"
     if should_run:

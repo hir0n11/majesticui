@@ -1,23 +1,9 @@
 import unittest
 from datetime import datetime, timezone
-from itertools import permutations
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
-from webarchive_spam import (
-    WaybackSnapshot,
-    WebArchivePageContent,
-    WebArchiveScriptObservation,
-    WebArchiveSpamResult,
-    archive_placeholder_reason,
-    check_webarchive_spam,
-    extract_archive_text,
-    fetch_wayback_snapshots,
-    scan_script_counts,
-    scan_wayback_text,
-    select_locale_samples,
-    webarchive_script_spam_result,
-)
+from webarchive_spam import extract_archive_text, fetch_wayback_snapshots, scan_wayback_text
 
 
 class WebArchiveSpamTests(unittest.TestCase):
@@ -172,7 +158,7 @@ class WebArchiveSpamTests(unittest.TestCase):
         self.assertEqual(open_text.call_count, 3)
         sleep.assert_called_once()
 
-    def test_archive_discovery_uses_two_life_windows_not_current_year(self):
+    def test_archive_window_uses_last_domain_life_years_not_current_year(self):
         latest_payload = (
             '[["timestamp","original","mimetype","statuscode","digest"],'
             '["20181112000000","http://old.example/","warc/revisit","-","latest"]]'
@@ -201,50 +187,31 @@ class WebArchiveSpamTests(unittest.TestCase):
                 timeout=1,
                 retries=0,
                 now=datetime(2026, 8, 10, tzinfo=timezone.utc),
-        )
+            )
 
         self.assertEqual(errors, [])
-        self.assertEqual(
-            [snapshot.timestamp for snapshot in snapshots],
-            ["20181112000000", "20140801000000", "20110101000000"],
-        )
+        self.assertEqual([snapshot.timestamp for snapshot in snapshots], ["20181112000000", "20140801000000"])
         self.assertEqual(len(urls), 2)
         query = parse_qs(urlparse(urls[1]).query)
-        self.assertEqual(query.get("from"), ["20081112"])
+        self.assertEqual(query.get("from"), ["20131112"])
         self.assertEqual(query.get("to"), ["20181112"])
 
-    def test_cdx_collects_each_variant_with_its_own_domain_life_window(self):
-        header_only = '[["timestamp","original","mimetype","statuscode","digest"]]'
-        bare_latest = (
+    def test_cdx_stops_after_first_working_domain_variant(self):
+        latest_payload = (
             '[["timestamp","original","mimetype","statuscode","digest"],'
-            '["20250908070304","http://helliad.com/","text/html","200","parked-latest"]]'
+            '["20250908070304","https://helliad.com/","text/html","200","latest"]]'
         )
-        bare_range = (
+        range_payload = (
             '[["timestamp","original","mimetype","statuscode","digest"],'
-            '["20250908070304","http://helliad.com/","text/html","200","parked-latest"],'
-            '["20240425172539","http://helliad.com/","text/html","200","parked-old"]]'
-        )
-        www_latest = (
-            '[["timestamp","original","mimetype","statuscode","digest"],'
-            '["20181112000000","http://www.helliad.com/","text/html","200","real-latest"]]'
-        )
-        www_range = (
-            '[["timestamp","original","mimetype","statuscode","digest"],'
-            '["20181112000000","http://www.helliad.com/","text/html","200","real-latest"],'
-            '["20140801000000","http://www.helliad.com/","text/html","200","real-old"]]'
+            '["20250908070304","https://helliad.com/","text/html","200","latest"],'
+            '["20250425172539","https://helliad.com/","text/html","200","old"]]'
         )
         urls = []
 
         def fake_open_text(url, timeout, max_bytes=1_000_000):
             urls.append(url)
-            query = parse_qs(urlparse(url).query)
-            original = query["url"][0]
-            is_latest = query.get("sort") == ["reverse"]
-            if original == "http://helliad.com/":
-                return bare_latest if is_latest else bare_range
-            if original == "http://www.helliad.com/":
-                return www_latest if is_latest else www_range
-            return header_only
+            self.assertIn("http%3A%2F%2Fhelliad.com%2F", url)
+            return latest_payload if len(urls) == 1 else range_payload
 
         with (
             patch(
@@ -262,486 +229,14 @@ class WebArchiveSpamTests(unittest.TestCase):
             snapshots, errors = fetch_wayback_snapshots(
                 "helliad.com",
                 years=5,
-                max_snapshots=8,
+                max_snapshots=5,
                 timeout=1,
                 retries=0,
             )
 
         self.assertEqual(errors, [])
-        self.assertEqual(
-            [snapshot.timestamp for snapshot in snapshots],
-            ["20250908070304", "20240425172539", "20181112000000", "20140801000000"],
-        )
-        self.assertEqual(len(urls), 6)
-        range_queries = [
-            parse_qs(urlparse(url).query)
-            for url in urls
-            if parse_qs(urlparse(url).query).get("sort") != ["reverse"]
-        ]
-        windows = {
-            query["url"][0]: (query.get("from", [""])[0], query.get("to", [""])[0])
-            for query in range_queries
-        }
-        self.assertEqual(windows["http://helliad.com/"], ("20150908", "20250908"))
-        self.assertEqual(windows["http://www.helliad.com/"], ("20081112", "20181112"))
-
-    def test_same_variant_late_parking_does_not_hide_prior_real_site_era(self):
-        latest_payload = (
-            '[["timestamp","original","mimetype","statuscode","digest"],'
-            '["20250908070304","https://example.org/","text/html","200","parking"]]'
-        )
-        range_payload = (
-            '[["timestamp","original","mimetype","statuscode","digest"],'
-            '["20250908070304","https://example.org/","text/html","200","parking"],'
-            '["20181201000000","https://example.org/","text/html","200","real-3"],'
-            '["20170601000000","https://example.org/","text/html","200","real-2"],'
-            '["20160701000000","https://example.org/","text/html","200","real-1"],'
-            '["20140101000000","https://example.org/","text/html","200","outside-guard"]]'
-        )
-        urls = []
-
-        def fake_open_text(url, timeout, max_bytes=1_000_000):
-            urls.append(url)
-            query = parse_qs(urlparse(url).query)
-            return latest_payload if query.get("sort") == ["reverse"] else range_payload
-
-        with (
-            patch("webarchive_spam._domain_variants", return_value=["https://example.org/"]),
-            patch("webarchive_spam._open_text", side_effect=fake_open_text),
-            patch("webarchive_spam.time.sleep"),
-        ):
-            snapshots, errors = fetch_wayback_snapshots(
-                "example.org",
-                years=5,
-                max_snapshots=8,
-                timeout=1,
-                retries=0,
-            )
-
-        self.assertEqual(errors, [])
-        self.assertEqual(
-            [snapshot.timestamp for snapshot in snapshots],
-            ["20250908070304", "20181201000000", "20170601000000", "20160701000000"],
-        )
-        range_query = parse_qs(urlparse(urls[1]).query)
-        self.assertEqual(range_query.get("from"), ["20150908"])
-        self.assertEqual(range_query.get("to"), ["20250908"])
-
-        real_text = (
-            "Example Foundation operates a community arts centre in Bristol, England. "
-            "Contact the local organisation for workshops, events and membership. "
-        ) * 8
-        pages = [
-            WebArchivePageContent(
-                snapshot=snapshot,
-                title=("Domain for sale" if snapshot.timestamp.startswith("2025") else "Example Foundation"),
-                text=(
-                    "This domain name is for sale. Buy this domain at Afternic. " * 10
-                    if snapshot.timestamp.startswith("2025")
-                    else real_text
-                ),
-            )
-            for snapshot in snapshots
-        ]
-        samples = select_locale_samples(pages, "example.org")
-        self.assertTrue(samples)
-        self.assertEqual(samples[0].life_start, "2016")
-        self.assertEqual(samples[0].life_end, "2018")
-        self.assertEqual(samples[0].supporting_snapshots, 3)
-        self.assertTrue(all(not sample.timestamp.startswith("2025") for sample in samples))
-
-    def test_locale_sample_ignores_latest_parking_and_uses_stable_site_life(self):
-        real_text = (
-            "Project Zero Deaths is an English multiplayer action game for Steam, iOS and Android. "
-            "Play worldwide with friends. Developer and publisher UAB Detis, Kaunas, Lithuania. "
-            "Contact support@example.com. "
-        ) * 5
-        pages = [
-            WebArchivePageContent(
-                snapshot=WaybackSnapshot("20190801000000", "https://projectzerodeaths.com/"),
-                title="Project Zero Deaths | Multiplayer Game",
-                text=real_text,
-            ),
-            WebArchivePageContent(
-                snapshot=WaybackSnapshot("20200801000000", "https://projectzerodeaths.com/"),
-                title="Project Zero Deaths | Multiplayer Game",
-                text=real_text + " Download the game today.",
-            ),
-            WebArchivePageContent(
-                snapshot=WaybackSnapshot("20250501000000", "https://projectzerodeaths.com/"),
-                title="projectzerodeaths.com is for sale",
-                text="This domain name is for sale. Buy this domain at Afternic. " * 20,
-            ),
-        ]
-
-        samples = select_locale_samples(pages, "projectzerodeaths.com")
-
-        self.assertTrue(samples)
-        self.assertNotIn("for sale", samples[0].title.lower())
-        self.assertEqual(samples[0].life_start, "2019")
-        self.assertEqual(samples[0].life_end, "2020")
-        self.assertEqual(samples[0].confidence, "MEDIUM")
-        self.assertIn("UAB Detis", samples[0].excerpt)
-
-    def test_locale_sample_is_empty_when_archive_contains_only_placeholders(self):
-        pages = [
-            WebArchivePageContent(
-                snapshot=WaybackSnapshot("20240101000000", "https://example.com/"),
-                title="Coming soon",
-                text="Our website is under construction. " * 30,
-            ),
-            WebArchivePageContent(
-                snapshot=WaybackSnapshot("20250101000000", "https://example.com/"),
-                title="Domain for sale",
-                text="This domain name is for sale. Buy this domain. " * 30,
-            ),
-        ]
-        self.assertEqual(select_locale_samples(pages, "example.com"), [])
-
-    def test_locale_sample_is_deterministic_and_generic_home_does_not_merge_eras(self):
-        original_text = (
-            "English community theatre in Bristol. Contact the organisers and visit our local venue. "
-            "The company performs plays, workshops and public events for residents. "
-        ) * 8
-        pages = [
-            WebArchivePageContent(
-                snapshot=WaybackSnapshot("20180501000000", "http://www.example.org/"),
-                title="Home",
-                text=original_text,
-            ),
-            WebArchivePageContent(
-                snapshot=WaybackSnapshot("20190501000000", "https://www.example.org/"),
-                title="Home",
-                text=original_text + "Tickets are available from the theatre office.",
-            ),
-            WebArchivePageContent(
-                snapshot=WaybackSnapshot("20240501000000", "https://example.org/"),
-                title="Home",
-                text=(
-                    "Lietuvos verslo paslaugos. UAB Nauja Era, Vilnius, Lithuania. "
-                    "Kontaktai, adresas ir telefono numeris pateikiami klientams. "
-                ) * 12,
-            ),
-        ]
-
-        selections = []
-        for ordering in permutations(pages):
-            samples = select_locale_samples(list(ordering), "example.org")
-            selections.append(
-                [(sample.timestamp, sample.life_start, sample.life_end) for sample in samples]
-            )
-
-        self.assertTrue(selections[0])
-        self.assertTrue(all(selection == selections[0] for selection in selections))
-        self.assertEqual(selections[0][0][1:], ("2018", "2019"))
-        self.assertTrue(all(not timestamp.startswith("2024") for timestamp, _start, _end in selections[0]))
-
-    def test_locale_sample_does_not_bridge_a_long_temporal_gap_by_title_alone(self):
-        shared_text = (
-            "Independent local arts association with workshops, events and member contacts. "
-        ) * 10
-        pages = [
-            WebArchivePageContent(
-                snapshot=WaybackSnapshot("20100101000000", "http://example.org/"),
-                title="Example Arts Association",
-                text=shared_text,
-            ),
-            WebArchivePageContent(
-                snapshot=WaybackSnapshot("20200101000000", "https://example.org/"),
-                title="Example Arts Association",
-                text=shared_text,
-            ),
-        ]
-
-        samples = select_locale_samples(pages, "example.org")
-
-        self.assertEqual(samples[0].supporting_snapshots, 1)
-        self.assertEqual(samples[0].life_start, "2010")
-        self.assertEqual(samples[0].life_end, "2010")
-
-    def test_placeholder_detection_keeps_long_article_and_short_contact_card(self):
-        article = (
-            "This troubleshooting guide explains why a remote dependency can return "
-            "service unavailable and access denied messages, with recovery steps. "
-        ) * 20
-        contact_card = (
-            "UAB Tikras Projektas, Gedimino g. 10, Vilnius, Lithuania. "
-            "+370 600 12345, info@tikras.lt"
-        )
-
-        self.assertEqual(archive_placeholder_reason("Incident response guide", article), "")
-        self.assertEqual(archive_placeholder_reason("Contact", contact_card), "")
-        self.assertEqual(
-            archive_placeholder_reason("Domain for sale", "Buy this domain at Afternic."),
-            "parking",
-        )
-
-    def test_title_is_not_duplicated_in_visible_text_or_script_counts(self):
-        japanese_title = "\u3042" * 10
-        title, text = extract_archive_text(
-            f"<html><head><title>{japanese_title}</title></head>"
-            "<body>Ordinary Latin body content for a legitimate site.</body></html>"
-        )
-
-        self.assertEqual(title, japanese_title)
-        self.assertNotIn(japanese_title, text)
-        counts = scan_script_counts(f"{title} {text}")
-        self.assertEqual(counts["japanese characters"], 10)
-        self.assertNotIn(
-            "japanese characters",
-            {match.category for match in scan_wayback_text(f"{title} {text}", locale="DE")},
-        )
-
-    def test_one_success_from_many_snapshots_is_not_a_clean_archive_check(self):
-        snapshots = [
-            WaybackSnapshot(f"202{i}0101000000", "http://example.org/")
-            for i in range(1, 4)
-        ]
-
-        def fake_snapshot_text(snapshot, timeout=8, max_chars=8000, retries=1):
-            if snapshot == snapshots[0]:
-                return snapshot, "Example", "Clean ordinary organisation content " * 20, ""
-            return snapshot, "", "", f"{snapshot.display_month}: TimeoutError"
-
-        with (
-            patch("webarchive_spam.fetch_wayback_snapshots", return_value=(snapshots, [])),
-            patch("webarchive_spam.fetch_wayback_snapshot_text", side_effect=fake_snapshot_text),
-        ):
-            result = check_webarchive_spam("example.org", max_workers=3)
-
-        self.assertFalse(result.checked)
-        self.assertFalse(result.spam)
-        self.assertEqual(result.snapshots_checked, 1)
-        self.assertTrue(any("incomplete usable snapshot coverage" in error for error in result.errors))
-
-    def test_two_successes_from_large_snapshot_set_are_not_clean_coverage(self):
-        snapshots = [
-            WaybackSnapshot(f"202{i}0101000000", "http://example.org/")
-            for i in range(1, 7)
-        ]
-
-        def fake_snapshot_text(snapshot, timeout=8, max_chars=8000, retries=1):
-            if snapshot in snapshots[:2]:
-                return snapshot, "Example", "Clean organisation content " * 30, ""
-            return snapshot, "", "", f"{snapshot.display_month}: TimeoutError"
-
-        with (
-            patch("webarchive_spam.fetch_wayback_snapshots", return_value=(snapshots, [])),
-            patch("webarchive_spam.fetch_wayback_snapshot_text", side_effect=fake_snapshot_text),
-        ):
-            result = check_webarchive_spam("example.org", max_workers=4)
-
-        self.assertFalse(result.checked)
-        self.assertEqual(result.snapshots_checked, 2)
-        self.assertTrue(any("incomplete usable snapshot coverage" in error for error in result.errors))
-
-    def test_discovery_only_spam_outside_configured_life_window_is_not_scanned(self):
-        snapshots = [
-            WaybackSnapshot("20250101000000", "https://example.org/"),
-            WaybackSnapshot("20240101000000", "https://example.org/"),
-            WaybackSnapshot("20160101000000", "https://example.org/"),
-        ]
-
-        def fake_snapshot_text(snapshot, timeout=8, max_chars=8000, retries=1):
-            if snapshot.timestamp.startswith("2016"):
-                return snapshot, "Casino takeover", "online casino viagra betting " * 30, ""
-            return (
-                snapshot,
-                "Example Community",
-                "Example Community runs local workshops, events and public services. " * 20,
-                "",
-            )
-
-        with (
-            patch("webarchive_spam.fetch_wayback_snapshots", return_value=(snapshots, [])),
-            patch("webarchive_spam.fetch_wayback_snapshot_text", side_effect=fake_snapshot_text),
-        ):
-            result = check_webarchive_spam(
-                "example.org",
-                years=5,
-                max_snapshots=6,
-                max_workers=3,
-                scan_scripts=False,
-            )
-
-        self.assertTrue(result.checked)
-        self.assertFalse(result.spam)
-        self.assertEqual(result.snapshots_checked, 2)
-        self.assertTrue(result.locale_samples)
-        self.assertEqual(result.locale_samples[0].life_start, "2024")
-        self.assertEqual(result.locale_samples[0].life_end, "2025")
-
-    def test_late_parking_triggers_exact_real_life_window_without_exceeding_html_budget(self):
-        discovery = [
-            WaybackSnapshot("20250908070304", "https://example.org/"),
-            WaybackSnapshot("20181201000000", "https://example.org/"),
-            WaybackSnapshot("20170601000000", "https://example.org/"),
-            WaybackSnapshot("20160701000000", "https://example.org/"),
-        ]
-        exact_window = [
-            WaybackSnapshot("20181201000000", "https://example.org/"),
-            WaybackSnapshot("20170601000000", "https://example.org/"),
-            WaybackSnapshot("20160701000000", "https://example.org/"),
-            WaybackSnapshot("20140101000000", "https://example.org/"),
-        ]
-        real_text = (
-            "Example Foundation operates a community centre in Bristol, England. "
-            "Contact the organisation for workshops, events and membership. "
-        ) * 15
-
-        def fake_snapshot_text(snapshot, timeout=8, max_chars=8000, retries=1):
-            if snapshot.timestamp.startswith("2025"):
-                return snapshot, "Domain for sale", "Buy this domain at Afternic. casino " * 30, ""
-            if snapshot.timestamp.startswith("2014"):
-                return snapshot, "Casino takeover", "online casino viagra betting " * 30, ""
-            return snapshot, "Example Foundation", real_text, ""
-
-        with (
-            patch("webarchive_spam.fetch_wayback_snapshots", return_value=(discovery, [])),
-            patch(
-                "webarchive_spam._fetch_wayback_window_snapshots",
-                return_value=(exact_window, []),
-            ) as exact_fetch,
-            patch(
-                "webarchive_spam.fetch_wayback_snapshot_text",
-                side_effect=fake_snapshot_text,
-            ) as html_fetch,
-        ):
-            result = check_webarchive_spam(
-                "example.org",
-                years=5,
-                max_snapshots=8,
-                max_workers=4,
-                scan_scripts=False,
-            )
-
-        self.assertTrue(result.checked)
-        self.assertTrue(result.spam)
-        self.assertEqual([hit.timestamp for hit in result.hits], ["20140101000000"])
-        self.assertLessEqual(html_fetch.call_count, 8)
-        exact_fetch.assert_called_once()
-        kwargs = exact_fetch.call_args.kwargs
-        self.assertEqual(kwargs["from_stamp"], "20131201")
-        self.assertEqual(kwargs["to_stamp"], "20181201")
-
-    def test_failed_required_exact_life_window_cannot_be_called_clean(self):
-        discovery = [
-            WaybackSnapshot("20250908070304", "https://example.org/"),
-            WaybackSnapshot("20181201000000", "https://example.org/"),
-            WaybackSnapshot("20170601000000", "https://example.org/"),
-            WaybackSnapshot("20160701000000", "https://example.org/"),
-        ]
-        real_text = "Example Foundation community workshops and local events. " * 30
-
-        def fake_snapshot_text(snapshot, timeout=8, max_chars=8000, retries=1):
-            if snapshot.timestamp.startswith("2025"):
-                return snapshot, "Domain for sale", "Buy this domain at Afternic.", ""
-            return snapshot, "Example Foundation", real_text, ""
-
-        with (
-            patch("webarchive_spam.fetch_wayback_snapshots", return_value=(discovery, [])),
-            patch(
-                "webarchive_spam._fetch_wayback_window_snapshots",
-                return_value=([], ["CDX policy window https://example.org/: TimeoutError"]),
-            ),
-            patch("webarchive_spam.fetch_wayback_snapshot_text", side_effect=fake_snapshot_text),
-        ):
-            result = check_webarchive_spam(
-                "example.org",
-                years=5,
-                max_snapshots=8,
-                max_workers=4,
-                scan_scripts=False,
-            )
-
-        self.assertFalse(result.checked)
-        self.assertFalse(result.no_life_found)
-        self.assertTrue(any("policy window" in error for error in result.errors))
-
-    def test_all_successful_placeholders_are_no_life_not_clean(self):
-        snapshots = [
-            WaybackSnapshot(f"202{i}0101000000", "https://example.org/")
-            for i in range(1, 4)
-        ]
-        with (
-            patch("webarchive_spam.fetch_wayback_snapshots", return_value=(snapshots, [])),
-            patch(
-                "webarchive_spam.fetch_wayback_snapshot_text",
-                side_effect=lambda snapshot, *args: (
-                    snapshot,
-                    "Domain for sale",
-                    "This domain name is for sale. Buy this domain at Afternic.",
-                    "",
-                ),
-            ),
-        ):
-            result = check_webarchive_spam("example.org", max_workers=3)
-
-        self.assertFalse(result.checked)
-        self.assertFalse(result.spam)
-        self.assertTrue(result.no_life_found)
-        self.assertEqual(result.snapshots_checked, 0)
-        self.assertEqual(result.errors, [])
-
-    def test_placeholders_plus_failed_possible_life_are_not_no_life_or_clean(self):
-        snapshots = [
-            WaybackSnapshot("20230101000000", "https://example.org/"),
-            WaybackSnapshot("20220101000000", "https://example.org/"),
-        ]
-
-        def fake_snapshot_text(snapshot, timeout=8, max_chars=8000, retries=1):
-            if snapshot.timestamp.startswith("2023"):
-                return snapshot, "Domain for sale", "Buy this domain at Afternic.", ""
-            return snapshot, "", "", "2022-01: TimeoutError"
-
-        with (
-            patch("webarchive_spam.fetch_wayback_snapshots", return_value=(snapshots, [])),
-            patch("webarchive_spam.fetch_wayback_snapshot_text", side_effect=fake_snapshot_text),
-        ):
-            result = check_webarchive_spam("example.org", max_snapshots=4, max_workers=2)
-
-        self.assertFalse(result.checked)
-        self.assertFalse(result.spam)
-        self.assertFalse(result.no_life_found)
-        self.assertIn("2022-01: TimeoutError", result.errors)
-
-    def test_one_success_from_one_snapshot_is_a_valid_clean_archive_check(self):
-        snapshot = WaybackSnapshot("20230101000000", "http://example.org/")
-        with (
-            patch("webarchive_spam.fetch_wayback_snapshots", return_value=([snapshot], [])),
-            patch(
-                "webarchive_spam.fetch_wayback_snapshot_text",
-                return_value=(snapshot, "Example", "Clean ordinary organisation content " * 20, ""),
-            ),
-        ):
-            result = check_webarchive_spam("example.org", max_workers=1)
-
-        self.assertTrue(result.checked)
-        self.assertFalse(result.spam)
-        self.assertEqual(result.snapshots_checked, 1)
-
-    def test_script_mismatch_is_deferred_until_final_locale(self):
-        japanese_text = "\u3042" * 25
-        result = WebArchiveSpamResult(
-            checked=True,
-            spam=False,
-            snapshots_found=1,
-            snapshots_checked=1,
-            script_observations=[
-                WebArchiveScriptObservation(
-                    timestamp="20220101000000",
-                    original="https://example.com/",
-                    title="Example",
-                    counts=scan_script_counts(japanese_text),
-                )
-            ],
-        )
-
-        self.assertIsNone(webarchive_script_spam_result(result, "JP"))
-        rejected = webarchive_script_spam_result(result, "DE")
-        self.assertIsNotNone(rejected)
-        self.assertTrue(rejected.spam)
-        self.assertIn("japanese characters", {m.category for m in rejected.hits[0].matches})
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(len(urls), 2)
 
 
 if __name__ == "__main__":
