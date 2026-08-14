@@ -7,6 +7,7 @@ import ipaddress
 import os
 import re
 import socket
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
@@ -58,6 +59,46 @@ def _env_int(name: str, default: int, minimum: int, maximum: int | None = None) 
         value = default
     value = max(minimum, value)
     return min(maximum, value) if maximum is not None else value
+
+
+def _is_opaque_gateway_bad_request(exc: Exception, base_url: str) -> bool:
+    """Identify ArionHub-style transient 400s that contain no actionable parameter."""
+
+    if not base_url or "api.openai.com" in str(base_url).casefold():
+        return False
+    if int(getattr(exc, "status_code", 0) or 0) != 400:
+        return False
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error", body)
+    if not isinstance(error, dict):
+        return False
+    message = str(error.get("message") or "").strip().casefold()
+    code = str(error.get("code") or "").strip().casefold()
+    param = str(error.get("param") or "").strip()
+    return (
+        not param
+        and code == "bad_request"
+        and ("request is invalid" in message or "the request is invalid" in message)
+    )
+
+
+def _validate_json_model_text(value: Any, text_format: type[BaseModel]) -> BaseModel:
+    """Validate plain JSON returned by compatibility gateways without schema support."""
+
+    text = str(value or "").strip()
+    try:
+        return text_format.model_validate_json(text)
+    except Exception as first_error:
+        start = text.find("{")
+        if start < 0:
+            raise RuntimeError("AI compatibility endpoint returned no JSON object") from first_error
+        try:
+            parsed, _ = json.JSONDecoder().raw_decode(text[start:])
+            return text_format.model_validate(parsed)
+        except Exception as exc:
+            raise RuntimeError("AI compatibility endpoint returned invalid structured JSON") from exc
 
 
 class LinkQuality(str, Enum):
@@ -2898,6 +2939,7 @@ class OpenAIDomainChecker:
         self.max_browser_article_pages = _env_int("OPENAI_BROWSER_ARTICLE_PAGES", 4, 0, 12)
         self.article_text_chars = _env_int("OPENAI_ARTICLE_TEXT_CHARS", 1200, 500, 5000)
         self.max_historic_pages_context = _env_int("OPENAI_MAX_HISTORIC_PAGES_CONTEXT", 15, 0, 50)
+        self.opaque_bad_request_retries = _env_int("OPENAI_BAD_REQUEST_RETRIES", 2, 0, 5)
         self.last_error = ""
         self.model_notice = ""
         self._model_access_checked = False
@@ -3035,16 +3077,82 @@ class OpenAIDomainChecker:
         }
         if self.reasoning_effort:
             kwargs["reasoning"] = {"effort": self.reasoning_effort}
-        response = self.client.responses.parse(**kwargs)
-        parsed = response.output_parsed
+        retry_count = max(0, int(getattr(self, "opaque_bad_request_retries", 2) or 0))
+        response = None
+        opaque_gateway_error: Optional[Exception] = None
+        try:
+            response = self.client.responses.parse(**kwargs)
+        except Exception as exc:
+            if not _is_opaque_gateway_bad_request(exc, getattr(self, "base_url", "")):
+                raise
+            opaque_gateway_error = exc
+        if response is not None:
+            parsed = response.output_parsed
+            usage = getattr(response, "usage", None)
+            input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+            output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        elif opaque_gateway_error is not None:
+            chat_kwargs: Dict[str, Any] = {
+                "model": model_name or self.model,
+                "messages": kwargs["input"],
+                "response_format": text_format,
+                "max_tokens": max_output_tokens,
+            }
+            if self.reasoning_effort:
+                chat_kwargs["reasoning_effort"] = self.reasoning_effort
+            try:
+                chat_response = self.client.chat.completions.parse(**chat_kwargs)
+            except Exception as exc:
+                if not _is_opaque_gateway_bad_request(exc, getattr(self, "base_url", "")):
+                    raise
+                schema = json.dumps(
+                    text_format.model_json_schema(), ensure_ascii=False, separators=(",", ":")
+                )
+                raw_messages = [dict(message) for message in kwargs["input"]]
+                raw_messages[0]["content"] = (
+                    str(raw_messages[0].get("content") or "")
+                    + "\n\nReturn ONLY one valid JSON object matching this JSON Schema exactly. "
+                    "No Markdown and no explanatory text. JSON_SCHEMA:"
+                    + schema
+                )
+                raw_kwargs: Dict[str, Any] = {
+                    "model": model_name or self.model,
+                    "messages": raw_messages,
+                    "max_tokens": max_output_tokens,
+                }
+                if self.reasoning_effort:
+                    raw_kwargs["reasoning_effort"] = self.reasoning_effort
+                raw_response = None
+                for attempt in range(retry_count + 1):
+                    try:
+                        raw_response = self.client.chat.completions.create(**raw_kwargs)
+                        break
+                    except Exception as raw_exc:
+                        if (
+                            not _is_opaque_gateway_bad_request(
+                                raw_exc, getattr(self, "base_url", "")
+                            )
+                            or attempt >= retry_count
+                        ):
+                            raise
+                        time.sleep(min(1.0 * (attempt + 1), 2.0))
+                if raw_response is None:  # pragma: no cover - loop returns or raises
+                    raise RuntimeError("AI compatibility endpoint returned no response")
+                parsed = _validate_json_model_text(
+                    raw_response.choices[0].message.content,
+                    text_format,
+                )
+                usage = getattr(raw_response, "usage", None)
+            else:
+                parsed = chat_response.choices[0].message.parsed
+                usage = getattr(chat_response, "usage", None)
+            input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+            output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        else:  # pragma: no cover - defensive, loop either returns or raises
+            raise RuntimeError("AI gateway returned no response")
         if parsed is None:
             raise RuntimeError("OpenAI returned no parsed structured output")
-        usage = getattr(response, "usage", None)
-        return (
-            parsed,
-            int(getattr(usage, "input_tokens", 0) or 0),
-            int(getattr(usage, "output_tokens", 0) or 0),
-        )
+        return parsed, input_tokens, output_tokens
 
     def evaluate(
         self,

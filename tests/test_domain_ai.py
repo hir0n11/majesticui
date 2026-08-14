@@ -79,6 +79,191 @@ def assessment_for(rows, articles: int = 0, **overrides):
 
 
 class DomainAggregationTests(unittest.TestCase):
+    def test_parse_retries_opaque_third_party_bad_request(self):
+        class OpaqueBadRequest(Exception):
+            status_code = 400
+            body = {
+                "message": "The request is invalid (request id: test)",
+                "type": "invalid_request_error",
+                "param": "",
+                "code": "bad_request",
+            }
+
+        parsed = AnchorScreenAssessment(
+            locale="LV",
+            language="lv",
+            topic="radio",
+            anchor_risk="CLEAN",
+            anchor_reasons=[],
+            hard_stop_reasons=[],
+            summary="clean",
+            warnings=[],
+        )
+        class Responses:
+            calls = 0
+
+            @classmethod
+            def parse(cls, **kwargs):
+                cls.calls += 1
+                raise OpaqueBadRequest()
+
+        class ChatCompletions:
+            parse_calls = 0
+            create_calls = 0
+
+            @classmethod
+            def parse(cls, **kwargs):
+                cls.parse_calls += 1
+                raise OpaqueBadRequest()
+
+            @classmethod
+            def create(cls, **kwargs):
+                cls.create_calls += 1
+                if cls.create_calls < 3:
+                    raise OpaqueBadRequest()
+                message = type(
+                    "Message",
+                    (),
+                    {"content": parsed.model_dump_json()},
+                )()
+                choice = type("Choice", (), {"message": message})()
+                usage = type("Usage", (), {"prompt_tokens": 12, "completion_tokens": 3})()
+                return type("ChatResponse", (), {"choices": [choice], "usage": usage})()
+
+        checker = OpenAIDomainChecker.__new__(OpenAIDomainChecker)
+        checker.client = type(
+            "Client",
+            (),
+            {
+                "responses": Responses(),
+                "chat": type("Chat", (), {"completions": ChatCompletions()})(),
+            },
+        )()
+        checker.base_url = "https://arionhub.pro/v1"
+        checker.model = "gpt-5.6-terra"
+        checker.reasoning_effort = ""
+        checker.opaque_bad_request_retries = 2
+        checker._model_access_checked = True
+
+        with patch("domain_ai.time.sleep") as sleep_mock:
+            value, input_tokens, output_tokens = checker._parse(
+                "prompt",
+                {"domain": "xradio.lv"},
+                AnchorScreenAssessment,
+                700,
+            )
+
+        self.assertEqual(value, parsed)
+        self.assertEqual((input_tokens, output_tokens), (12, 3))
+        self.assertEqual(Responses.calls, 1)
+        self.assertEqual(ChatCompletions.parse_calls, 1)
+        self.assertEqual(ChatCompletions.create_calls, 3)
+        self.assertEqual(sleep_mock.call_count, 2)
+
+    def test_parse_does_not_retry_actionable_bad_request(self):
+        class ActionableBadRequest(Exception):
+            status_code = 400
+            body = {
+                "message": "Unsupported schema",
+                "type": "invalid_request_error",
+                "param": "text.format",
+                "code": "bad_request",
+            }
+
+        class Responses:
+            calls = 0
+
+            @classmethod
+            def parse(cls, **kwargs):
+                cls.calls += 1
+                raise ActionableBadRequest()
+
+        checker = OpenAIDomainChecker.__new__(OpenAIDomainChecker)
+        checker.client = type("Client", (), {"responses": Responses()})()
+        checker.base_url = "https://arionhub.pro/v1"
+        checker.model = "gpt-5.6-terra"
+        checker.reasoning_effort = ""
+        checker.opaque_bad_request_retries = 2
+        checker._model_access_checked = True
+
+        with self.assertRaises(ActionableBadRequest), patch("domain_ai.time.sleep") as sleep_mock:
+            checker._parse(
+                "prompt",
+                {"domain": "xradio.lv"},
+                AnchorScreenAssessment,
+                700,
+            )
+
+        self.assertEqual(Responses.calls, 1)
+        sleep_mock.assert_not_called()
+
+    def test_parse_falls_back_to_chat_parse_for_opaque_gateway_bad_request(self):
+        class OpaqueBadRequest(Exception):
+            status_code = 400
+            body = {
+                "message": "The request is invalid (request id: test)",
+                "type": "invalid_request_error",
+                "param": "",
+                "code": "bad_request",
+            }
+
+        parsed = AnchorScreenAssessment(
+            locale="LV",
+            language="lv",
+            topic="radio",
+            anchor_risk="CLEAN",
+            anchor_reasons=[],
+            hard_stop_reasons=[],
+            summary="clean",
+            warnings=[],
+        )
+
+        class Responses:
+            calls = 0
+
+            @classmethod
+            def parse(cls, **kwargs):
+                cls.calls += 1
+                raise OpaqueBadRequest()
+
+        class ChatCompletions:
+            calls = 0
+
+            @classmethod
+            def parse(cls, **kwargs):
+                cls.calls += 1
+                message = type("Message", (), {"parsed": parsed})()
+                choice = type("Choice", (), {"message": message})()
+                usage = type("Usage", (), {"prompt_tokens": 21, "completion_tokens": 5})()
+                return type("ChatResponse", (), {"choices": [choice], "usage": usage})()
+
+        checker = OpenAIDomainChecker.__new__(OpenAIDomainChecker)
+        checker.client = type(
+            "Client",
+            (),
+            {
+                "responses": Responses(),
+                "chat": type("Chat", (), {"completions": ChatCompletions()})(),
+            },
+        )()
+        checker.base_url = "https://arionhub.pro/v1"
+        checker.model = "gpt-5.6-terra"
+        checker.reasoning_effort = ""
+        checker.opaque_bad_request_retries = 0
+        checker._model_access_checked = True
+
+        value, input_tokens, output_tokens = checker._parse(
+            "prompt",
+            {"domain": "xradio.lv"},
+            AnchorScreenAssessment,
+            700,
+        )
+
+        self.assertIs(value, parsed)
+        self.assertEqual((input_tokens, output_tokens), (21, 5))
+        self.assertEqual(Responses.calls, 1)
+        self.assertEqual(ChatCompletions.calls, 1)
+
     def test_gateway_does_not_silently_use_luna_for_quality(self):
         class Models:
             @staticmethod
