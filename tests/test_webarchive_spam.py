@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
-from webarchive_spam import extract_archive_text, fetch_wayback_snapshots, scan_wayback_text
+from webarchive_spam import extract_archive_text, fetch_wayback_snapshots, scan_spam_text, scan_wayback_text
 
 
 class WebArchiveSpamTests(unittest.TestCase):
@@ -61,6 +61,48 @@ class WebArchiveSpamTests(unittest.TestCase):
             )
         }
         self.assertIn("multilingual pharma", pharma_categories)
+
+    def test_detects_field_observed_indonesian_seo_spam_phrases(self):
+        categories = {
+            match.category
+            for match in scan_spam_text(
+                "Agen slot resmi, RTP slot, pola slot gacor, scatter hitam, maxwin slot dan mahjong ways."
+            )
+        }
+        self.assertIn("multilingual gambling", categories)
+
+    def test_detects_obfuscated_pharma_names(self):
+        for text in ("v-i-a-g-r-a", "c i a l i s", "l.e.v.i.t.r.a"):
+            with self.subTest(text=text):
+                categories = {match.category for match in scan_spam_text(text)}
+                self.assertIn("pharma", categories)
+
+    def test_detects_high_confidence_gambling_phrases_across_scripts(self):
+        samples = (
+            "おすすめオンラインカジノとスポーツベッティング",
+            "사설토토 먹튀검증 카지노사이트",
+            "真人视讯博彩平台",
+            "موقع مراهنات وكازينو أون لاين",
+            "קזינו אונליין ואתר הימורים",
+        )
+        for text in samples:
+            with self.subTest(text=text):
+                categories = {match.category for match in scan_spam_text(text)}
+                self.assertIn("multilingual gambling", categories)
+
+    def test_detects_high_confidence_european_gambling_phrases(self):
+        samples = (
+            "casino utan svensk licens och bettingsidor",
+            "nettikasino ja vedonlyönti",
+            "internetinis kazino ir lažybos internetu",
+            "online kaszinó és sportfogadás",
+            "pariuri sportive și jocuri de noroc",
+            "canlı bahis ve bahis sitesi",
+        )
+        for text in samples:
+            with self.subTest(text=text):
+                categories = {match.category for match in scan_spam_text(text)}
+                self.assertIn("multilingual gambling", categories)
 
     def test_detects_japanese_sidejob_investment_archive_spam(self):
         matches = scan_wayback_text(

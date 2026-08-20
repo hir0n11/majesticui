@@ -21,6 +21,7 @@ from domain_ai import (
     is_seo_noise_only_reason,
     is_exact_homepage,
     local_backlink_precheck,
+    local_backlink_topic_spam_precheck,
     local_domain_name_precheck,
     local_historic_pages_precheck,
     local_source_age_precheck,
@@ -1065,6 +1066,58 @@ class DomainAggregationTests(unittest.TestCase):
             row["outbound_external"] = 149
             row["external_domains"] = 74
         self.assertIsNone(local_backlink_precheck("drop.de", "DE", rows))
+
+    def test_backlink_topic_spam_stops_duckshooter_profile_before_ai(self):
+        rows = make_rows(200, domain="duckshooter.de")
+        for index, row in enumerate(rows):
+            if index < 148:
+                row["source_title"] = (
+                    "Online Casino and Free Slot Machine Guide"
+                    if index % 2
+                    else "Best Gambling Establishment Slots and Roulette"
+                )
+                row["source_url"] = f"https://spam{index}.example/online-casino-slots-{index}/"
+            else:
+                row["source_title"] = "Regional museum programme"
+        result = local_backlink_topic_spam_precheck("duckshooter.de", "DE", rows)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "BAD:LOCAL_HARD_STOP")
+        self.assertEqual(result.early_stop_stage, "local_backlink_topic_spam")
+        self.assertEqual(result.model, "LOCAL_RULES")
+        self.assertEqual(result.api_calls, 0)
+        self.assertIn("148 из 200", result.reason)
+
+    def test_backlink_topic_spam_supports_multiple_languages(self):
+        rows = make_rows(6, domain="drop.com")
+        rows[0]["source_title"] = "Najlepsze kasyno online i zakłady bukmacherskie"
+        rows[1]["source_title"] = "Casino en línea y apuestas deportivas"
+        rows[2]["source_title"] = "สล็อตออนไลน์ คาสิโนออนไลน์ บาคาร่า"
+        result = local_backlink_topic_spam_precheck("drop.com", "TEST", rows)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "BAD:LOCAL_HARD_STOP")
+        self.assertEqual(result.api_calls, 0)
+
+    def test_backlink_topic_spam_supports_non_latin_country_profiles(self):
+        rows = make_rows(6, domain="drop.com")
+        rows[0]["source_title"] = "おすすめオンラインカジノとスポーツベッティング"
+        rows[1]["source_title"] = "사설토토 먹튀검증 카지노사이트"
+        rows[2]["source_title"] = "موقع مراهنات وكازينو أون لاين"
+        result = local_backlink_topic_spam_precheck("drop.com", "TEST", rows)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "BAD:LOCAL_HARD_STOP")
+        self.assertEqual(result.api_calls, 0)
+
+    def test_backlink_topic_spam_ignores_one_isolated_bad_title(self):
+        rows = make_rows(12, domain="museum.de")
+        rows[0]["source_title"] = "Online casino bonus guide"
+        self.assertIsNone(local_backlink_topic_spam_precheck("museum.de", "DE", rows))
+
+    def test_backlink_topic_spam_ignores_benign_slot_car_profile(self):
+        rows = make_rows(8, domain="slotcarclub.org")
+        for index, row in enumerate(rows):
+            row["source_title"] = f"Slot Car Club race results round {index}"
+            row["source_url"] = f"https://club{index}.example/slot-car-racing/results/"
+        self.assertIsNone(local_backlink_topic_spam_precheck("slotcarclub.org", "US", rows))
 
     def test_local_strict_precheck_rejects_when_homepage_share_cannot_reach_near(self):
         rows = make_rows(8, domain="drop.de")

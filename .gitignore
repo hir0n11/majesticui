@@ -18,6 +18,7 @@ last_backlinks_debug.json
 # Local archives/shortcuts
 *.zip
 *.lnk
+chromedriver.exe
 
 # Local agent/cache folders
 .agents/

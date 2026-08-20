@@ -22,6 +22,8 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from pydantic import BaseModel, Field
 
+from webarchive_spam import custom_spam_words, scan_spam_text
+
 try:
     from openai import OpenAI
 except Exception:  # pragma: no cover - surfaced through readiness in the UI
@@ -948,6 +950,24 @@ ANCHOR_HARD_STOP_PATTERNS: Sequence[tuple[str, re.Pattern[str]]] = (
 )
 ANCHOR_SINGLE_ROW_HARD_STOP_LABELS = frozenset({"forex/trading"})
 
+BACKLINK_BENIGN_SLOT_RE = re.compile(
+    r"\b(?:slot\s*cars?|slotcar|time\s+slots?|appointment\s+slots?|"
+    r"parking\s+slots?|memory\s+slots?|expansion\s+slots?)\b",
+    re.IGNORECASE,
+)
+BACKLINK_EXPLICIT_GAMBLING_RE = re.compile(
+    r"(?:\b(?:casino|kasino|gambling|betting|sportsbook|bookmaker|poker|blackjack|roulette|togel)\b|"
+    r"\b(?:free|online|casino|penny|deposit|trial|real\s+money|jackpot)"
+    r"(?:\s+[^\s]+){0,3}\s+slots?\b|\bslot\s+machines?\b|"
+    r"(?:พนันออนไลน์|เว็บสล็อต|สล็อตแตกง่าย|แทงบอล|บาคาร่า|คาสิโนออนไลน์|หวยออนไลน์|"
+    r"토토사이트|온라인카지노|스포츠토토|바카라|슬롯머신|카지노사이트|사설토토|먹튀검증|온라인슬롯|"
+    r"在线博彩|網上博彩|网上赌场|在線賭場|在线赌场|真人娱乐城|真人视讯|真人視訊|"
+    r"オンラインカジノ|ネットカジノ|スポーツベッティング|オンライン賭博|"
+    r"كازينو\s+(?:أون|اون)\s*لاين|مراهنات\s+رياضية|"
+    r"קזינו\s+אונליין|הימורים\s+באינטרנט))",
+    re.IGNORECASE,
+)
+
 
 def unique_backlinks(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Keep one row per canonical donor-page pair before spending API tokens."""
@@ -1017,6 +1037,105 @@ def scan_anchor_hard_stops(
         if len(reasons) >= 5:
             break
     return list(dict.fromkeys(reasons))
+
+
+def _backlink_spam_text(row: Dict[str, Any]) -> str:
+    title = re.sub(r"\s+", " ", str(row.get("source_title") or "")).strip()
+    raw_url = str(row.get("source_url") or "").strip()
+    try:
+        parsed = urlparse(raw_url)
+        url_text = unquote(f"{parsed.path} {parsed.query}")
+    except ValueError:
+        url_text = raw_url
+    url_text = re.sub(r"[-_+/=?&#.]+", " ", url_text)
+    return re.sub(r"\s+", " ", f"{title} {url_text}").strip()
+
+
+def _backlink_source_host(row: Dict[str, Any]) -> str:
+    source_domain = str(row.get("source_domain") or "").strip().lower().removeprefix("www.")
+    if source_domain:
+        return source_domain
+    try:
+        return (urlparse(str(row.get("source_url") or "")).hostname or "").lower().removeprefix("www.")
+    except ValueError:
+        return ""
+
+
+def local_backlink_topic_spam_precheck(
+    domain: str,
+    title: str,
+    backlinks: Iterable[Dict[str, Any]],
+) -> Optional[DomainVerdict]:
+    """Reject a profile when many independent Backlinks titles/paths hit the shared spam dictionary."""
+
+    rows = unique_backlinks(backlinks)
+    if len(rows) < 3:
+        return None
+
+    custom_words_values = custom_spam_words()
+    matched_rows: List[tuple[Dict[str, Any], str, List[str]]] = []
+    category_counts: Counter[str] = Counter()
+    donor_hosts: set[str] = set()
+    generic_categories = {"english spam words", "russian spam words"}
+
+    for row in rows:
+        text = _backlink_spam_text(row)
+        if not text:
+            continue
+        matches = scan_spam_text(text, custom_words_override=custom_words_values)
+        categories = list(dict.fromkeys(match.category for match in matches))
+        if not categories:
+            continue
+        if (
+            set(categories).issubset({"english spam words", "casino/betting"})
+            and BACKLINK_BENIGN_SLOT_RE.search(text)
+            and not BACKLINK_EXPLICIT_GAMBLING_RE.search(text)
+        ):
+            continue
+        specific_categories = [category for category in categories if category not in generic_categories]
+        counted_categories = specific_categories or categories
+        matched_rows.append((row, text, counted_categories))
+        category_counts.update(set(counted_categories))
+        donor_host = _backlink_source_host(row)
+        if donor_host:
+            donor_hosts.add(donor_host)
+
+    hit_count = len(matched_rows)
+    hit_share = hit_count / len(rows)
+    independent_donors = len(donor_hosts)
+    dominant_profile = hit_count >= 3 and independent_donors >= 3 and hit_share >= 0.50
+    mass_profile = hit_count >= 8 and independent_donors >= 5 and hit_share >= 0.20
+    if not (dominant_profile or mass_profile):
+        return None
+
+    locale, locale_source = resolve_locale_with_source(title, domain, "")
+    required_unique, required_articles = thresholds_for_locale(locale)
+    top_categories = ", ".join(
+        f"{category} ({count})"
+        for category, count in category_counts.most_common(4)
+    )
+    examples = "; ".join(
+        f"«{re.sub(r'\s+', ' ', str(row.get('source_title') or text))[:100]}»"
+        for row, text, _categories in matched_rows[:3]
+    )
+    reason = (
+        "Локальный жесткий стоп по Backlinks до Historic Pages/Anchor/API: "
+        f"запрещенные темы найдены в {hit_count} из {len(rows)} уникальных строк "
+        f"({hit_share:.0%}), независимых доноров {independent_donors}; "
+        f"категории: {top_categories}. Примеры: {examples}. AI не вызывался."
+    )
+    return DomainVerdict(
+        verdict="REJECT",
+        status="BAD:LOCAL_HARD_STOP",
+        reason=reason,
+        locale=locale,
+        locale_source=locale_source,
+        required_unique=required_unique,
+        required_articles=required_articles,
+        hard_stop_reasons=[reason],
+        model="LOCAL_RULES",
+        early_stop_stage="local_backlink_topic_spam",
+    )
 
 
 SEO_NOISE_REASON_RE = re.compile(
@@ -3024,7 +3143,12 @@ class OpenAIDomainChecker:
 
         evidence = prepare_evidence(domain, title, backlinks_report, {"rows": []}, {"rows": []})
         return (
-            local_backlink_precheck(
+            local_backlink_topic_spam_precheck(
+                domain,
+                title,
+                evidence["backlinks"],
+            )
+            or local_backlink_precheck(
                 domain,
                 title,
                 evidence["backlinks"],

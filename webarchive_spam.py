@@ -184,6 +184,9 @@ SPAM_PATTERNS: Sequence[tuple[str, re.Pattern[str]]] = (
         "pharma",
         re.compile(
             r"\b(?:viagra|cialis|levitra|kamagra|sildenafil|tadalafil|phentermine|"
+            r"v(?:[\s._-]{1,3})i(?:[\s._-]{1,3})a(?:[\s._-]{1,3})g(?:[\s._-]{1,3})r(?:[\s._-]{1,3})a|"
+            r"c(?:[\s._-]{1,3})i(?:[\s._-]{1,3})a(?:[\s._-]{1,3})l(?:[\s._-]{1,3})i(?:[\s._-]{1,3})s|"
+            r"l(?:[\s._-]{1,3})e(?:[\s._-]{1,3})v(?:[\s._-]{1,3})i(?:[\s._-]{1,3})t(?:[\s._-]{1,3})r(?:[\s._-]{1,3})a|"
             r"provigil|priligy|online\s+pharmacy|generic\s+(?:viagra|cialis)|"
             r"buy\s+(?:pills|viagra|cialis|levitra|kamagra))\b",
             re.IGNORECASE,
@@ -216,8 +219,10 @@ SPAM_PATTERNS: Sequence[tuple[str, re.Pattern[str]]] = (
         re.compile(
             r"(?:"
             r"\b(?:sbobet|ibcbet|maxbet|cmd368|playme8|cakep\s*togel|judi\s+online|judi\s+(?:bola|slot)|"
-            r"situs\s+(?:judi|slot|togel)|bandar\s+(?:judi|togel)|agen\s+(?:sbobet|bola|togel)|"
-            r"taruhan\s+(?:online|bola)|slot\s+gacor|togel\s+online|"
+            r"situs\s+(?:judi|slot|togel)|bandar\s+(?:judi|togel|slot)|agen\s+(?:sbobet|bola|togel|slot|judi)|"
+            r"taruhan\s+(?:online|bola)|slot\s+gacor|togel\s+online|rtp\s+(?:live\s+)?slot|"
+            r"pola\s+(?:slot\s+)?gacor|scatter\s+hitam|(?:maxwin\s+slot|slot\s+maxwin)|"
+            r"mahjong\s+ways|sabung\s+ayam|qiu\s+qiu|qq\s+online|poker\s+online|"
             r"daftar\s+(?:sbobet|slot|judi|togel)|login\s+(?:sbobet|slot|judi|togel)|"
             r"link\s+alternatif\s+(?:sbobet|slot|judi|togel)|"
             r"(?:deposit\s+pulsa.{0,40}(?:slot|togel|judi)|(?:slot|togel|judi).{0,40}deposit\s+pulsa))\b|"
@@ -230,10 +235,27 @@ SPAM_PATTERNS: Sequence[tuple[str, re.Pattern[str]]] = (
             r"casino\s+en\s+ligne|paris\s+sportifs|"
             r"casin[oò]\s+online|scommesse\s+sportive|"
             r"kasyno\s+online|online\s+kasyno|zakłady\s+bukmacherskie|zaklady\s+bukmacherskie|"
-            r"wettanbieter|sportwetten|spielautomaten)\b|"
+            r"wettanbieter|sportwetten|spielautomaten|"
+            r"online\s+gokken|goksites?|sportweddenschappen|"
+            r"n[aä]tcasino|bettingsidor|casino\s+utan\s+svensk\s+licens|"
+            r"nettcasino|pengespill\s+p[åa]\s+nett|nettikasino|vedonly[oö]nti|kolikkopelit|"
+            r"internetinis\s+kazino|lažybos\s+internetu|azartiniai\s+lošimai|"
+            r"tiešsaistes\s+kazino|sporta\s+derības|azartspēles|"
+            r"online\s+kasiino|spordiennustus|hasartmängud|"
+            r"online\s+kaszin[oó]|sportfogad[aá]s|nyerőgépek|"
+            r"sportovn[ií]\s+s[aá]zen[ií]|hazardn[ií]\s+hry|"
+            r"športov[eé]\s+st[aá]vky|hazardn[eé]\s+hry|"
+            r"cazino\s+online|pariuri\s+sportive|jocuri\s+de\s+noroc|"
+            r"bahis\s+sitesi|canl[ıi]\s+bahis|kumar\s+sitesi|online\s+kumar)\b|"
             r"(?:พนันออนไลน์|เว็บสล็อต|สล็อตแตกง่าย|แทงบอล|บาคาร่า|คาสิโนออนไลน์|หวยออนไลน์|"
-            r"토토사이트|온라인카지노|스포츠토토|바카라|슬롯머신|"
-            r"在线博彩|網上博彩|网上赌场|在線賭場|在线赌场|真人娱乐城)"
+            r"토토사이트|온라인카지노|스포츠토토|바카라|슬롯머신|카지노사이트|사설토토|먹튀검증|온라인슬롯|"
+            r"在线博彩|網上博彩|网上赌场|在線賭場|在线赌场|真人娱乐城|真人视讯|真人視訊|"
+            r"真人博彩|博彩平台|博彩网站|博彩網站|"
+            r"オンラインカジノ|インターネットカジノ|ネットカジノ|スポーツベッティング|"
+            r"ブックメーカー|オンライン賭博|カジノサイト|"
+            r"διαδικτυακό\s+καζίνο|αθλητικό\s+στοίχημα|τυχερά\s+παιχνίδια|"
+            r"كازينو\s+(?:أون|اون)\s*لاين|مراهنات\s+رياضية|موقع\s+مراهنات|قمار\s+اون\s*لاين|"
+            r"קזינו\s+אונליין|הימורים\s+באינטרנט|אתר\s+הימורים)"
             r")",
             re.IGNORECASE,
         ),
@@ -648,20 +670,29 @@ def extract_archive_text(html: str, max_chars: int = 8000) -> tuple[str, str]:
     return title, text[:max_chars]
 
 
-def scan_wayback_text(text: str, locale: str = "") -> List[WebArchiveSpamMatch]:
+def scan_spam_text(
+    text: str,
+    custom_words_override: Sequence[str] | None = None,
+) -> List[WebArchiveSpamMatch]:
+    """Scan ordinary visible text with the shared multilingual spam dictionary."""
+
     clean = re.sub(r"\s+", " ", str(text or "")).strip()
     if not clean:
         return []
     matches: List[WebArchiveSpamMatch] = []
-    matches.extend(scan_script_filters(clean, locale=locale))
     for category, pattern in SPAM_PATTERNS:
         found = [match.group(0).strip() for match in pattern.finditer(clean)]
         if found:
             sample = found[0]
             matches.append(WebArchiveSpamMatch(category=category, sample=sample, count=len(found)))
+    custom_words_values = (
+        custom_spam_words()
+        if custom_words_override is None
+        else [str(word).strip() for word in custom_words_override if str(word).strip()]
+    )
     custom_found = [
         word
-        for word in custom_spam_words()
+        for word in custom_words_values
         if re.search(rf"(?<!\w){re.escape(word)}(?!\w)", clean, re.IGNORECASE)
     ]
     if custom_found:
@@ -672,6 +703,15 @@ def scan_wayback_text(text: str, locale: str = "") -> List[WebArchiveSpamMatch]:
                 count=len(custom_found),
             )
         )
+    return matches
+
+
+def scan_wayback_text(text: str, locale: str = "") -> List[WebArchiveSpamMatch]:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not clean:
+        return []
+    matches = scan_script_filters(clean, locale=locale)
+    matches.extend(scan_spam_text(clean))
     return matches
 
 

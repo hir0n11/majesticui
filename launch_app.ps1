@@ -1,6 +1,20 @@
 $ErrorActionPreference = "SilentlyContinue"
 
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+# Selenium Manager must choose a driver compatible with the installed Chrome.
+# Remove PATH entries that would make Selenium reuse a stale chromedriver.
+$env:Path = (@($env:Path -split ";") | Where-Object {
+    if ([string]::IsNullOrWhiteSpace($_)) {
+        return $false
+    }
+    try {
+        $pathEntry = [System.IO.Path]::GetFullPath($_.Trim())
+        -not (Test-Path -LiteralPath (Join-Path $pathEntry "chromedriver.exe") -PathType Leaf)
+    }
+    catch {
+        return $true
+    }
+}) -join ";"
 $pidFile = Join-Path $projectDir "majui.pid"
 $profileDir = [System.IO.Path]::GetFullPath("C:\MajesticSeleniumProfile")
 $expectedProfileDir = [System.IO.Path]::GetFullPath("C:\MajesticSeleniumProfile")
